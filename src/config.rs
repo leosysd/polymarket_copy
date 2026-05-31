@@ -122,24 +122,18 @@ impl Config {
     }
 
     fn validate_live(&self) -> Result<()> {
-        let s = &self.secrets;
-        let missing: Vec<&str> = [
-            ("PM_PRIVATE_KEY", &s.private_key),
-            ("PM_API_KEY", &s.api_key),
-            ("PM_API_SECRET", &s.api_secret),
-            ("PM_API_PASSPHRASE", &s.api_passphrase),
-        ]
-        .iter()
-        .filter(|(_, v)| v.is_none())
-        .map(|(k, _)| *k)
-        .collect();
-
-        if !missing.is_empty() {
-            return Err(anyhow!(
-                "live mode requires these environment variables: {}",
-                missing.join(", ")
-            ));
+        // Only the private key is mandatory. If the CLOB API credentials are
+        // absent they are derived from the key at startup.
+        if self.secrets.private_key.is_none() {
+            return Err(anyhow!("live mode requires PM_PRIVATE_KEY"));
         }
         Ok(())
+    }
+
+    /// True when any of the three CLOB API credentials is missing.
+    pub fn needs_api_creds(&self) -> bool {
+        self.secrets.api_key.is_none()
+            || self.secrets.api_secret.is_none()
+            || self.secrets.api_passphrase.is_none()
     }
 }

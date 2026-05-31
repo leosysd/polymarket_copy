@@ -29,6 +29,26 @@ sol! {
         uint8 side;
         uint8 signatureType;
     }
+
+    // L1 auth struct used to derive/create CLOB API credentials.
+    #[allow(missing_docs)]
+    struct ClobAuth {
+        address address;
+        string timestamp;
+        uint256 nonce;
+        string message;
+    }
+}
+
+const CLOB_AUTH_MESSAGE: &str = "This message attests that I control the given wallet";
+
+/// r || s || v, with v normalised to {27, 28} as Polymarket expects.
+fn encode_signature(sig: &alloy::primitives::Signature) -> String {
+    let mut bytes = [0u8; 65];
+    bytes[..32].copy_from_slice(&sig.r().to_be_bytes::<32>());
+    bytes[32..64].copy_from_slice(&sig.s().to_be_bytes::<32>());
+    bytes[64] = 27 + sig.v() as u8;
+    format!("0x{}", hex::encode(bytes))
 }
 
 /// The inputs needed to build one signed order.
@@ -86,6 +106,25 @@ impl OrderSigner {
         self.signer.address()
     }
 
+    /// Sign the EIP-712 `ClobAuth` struct (L1 auth) used to create/derive API
+    /// credentials. `timestamp` is the unix-seconds string sent as POLY_TIMESTAMP.
+    pub fn sign_clob_auth(&self, timestamp: &str, nonce: u64) -> Result<String> {
+        let auth = ClobAuth {
+            address: self.signer.address(),
+            timestamp: timestamp.to_string(),
+            nonce: U256::from(nonce),
+            message: CLOB_AUTH_MESSAGE.to_string(),
+        };
+        let domain = eip712_domain! {
+            name: "ClobAuthDomain",
+            version: "1",
+            chain_id: self.chain_id,
+        };
+        let hash: B256 = auth.eip712_signing_hash(&domain);
+        let sig = self.signer.sign_hash_sync(&hash).context("signing ClobAuth")?;
+        Ok(encode_signature(&sig))
+    }
+
     pub fn sign(&self, inp: &OrderInputs) -> Result<SignedOrderPayload> {
         let salt: u64 = rand::thread_rng().gen();
         let token_id =
@@ -115,13 +154,7 @@ impl OrderSigner {
 
         let hash: B256 = order.eip712_signing_hash(&domain);
         let sig = self.signer.sign_hash_sync(&hash).context("signing order hash")?;
-
-        // r || s || v, with v normalised to {27, 28} as the exchange expects.
-        let mut bytes = [0u8; 65];
-        bytes[..32].copy_from_slice(&sig.r().to_be_bytes::<32>());
-        bytes[32..64].copy_from_slice(&sig.s().to_be_bytes::<32>());
-        bytes[64] = 27 + sig.v() as u8;
-        let signature = format!("0x{}", hex::encode(bytes));
+        let signature = encode_signature(&sig);
 
         Ok(SignedOrderPayload {
             salt: salt.to_string(),

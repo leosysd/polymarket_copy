@@ -12,12 +12,13 @@ mod monitor;
 mod sizing;
 mod state;
 
+use crate::clob::{create_or_derive_api_creds, OrderSigner};
 use crate::config::{Config, Mode};
 use crate::executor::{ClobExecutor, DryRunExecutor, OrderExecutor};
 use crate::monitor::Monitor;
 use crate::state::State;
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{anyhow, Result};
+use clap::{Parser, Subcommand};
 use reqwest::Client;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,6 +35,15 @@ struct Args {
     /// Run a single poll cycle and exit (useful for testing).
     #[arg(long)]
     once: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Derive CLOB API credentials from PM_PRIVATE_KEY and print them for .env.
+    DeriveKey,
 }
 
 #[tokio::main]
@@ -42,21 +52,37 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing();
 
-    let cfg = Config::load(&args.config)?;
+    let mut cfg = Config::load(&args.config)?;
     let http = Client::builder()
         .user_agent(concat!("pmcopy/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
         .build()?;
 
+    // Subcommand: derive credentials and print them, then exit.
+    if let Some(Command::DeriveKey) = args.command {
+        return derive_and_print(&http, &cfg).await;
+    }
+
     let monitor = Monitor::new(http.clone(), cfg.file.endpoints.data_api.clone());
 
     let executor: Box<dyn OrderExecutor> = match cfg.file.mode {
         Mode::DryRun => Box::new(DryRunExecutor::new(PathBuf::from(&cfg.file.state.ledger_file))),
-        Mode::Live => Box::new(ClobExecutor::new(
-            http.clone(),
-            &cfg.file.endpoints,
-            &cfg.secrets,
-        )?),
+        Mode::Live => {
+            // Auto-derive CLOB API credentials from the private key if absent.
+            if cfg.needs_api_creds() {
+                info!("CLOB API credentials not set — deriving from PM_PRIVATE_KEY");
+                let creds = derive_creds(&http, &cfg).await?;
+                cfg.secrets.api_key = Some(creds.api_key);
+                cfg.secrets.api_secret = Some(creds.secret);
+                cfg.secrets.api_passphrase = Some(creds.passphrase);
+                info!("derived CLOB API key successfully");
+            }
+            Box::new(ClobExecutor::new(
+                http.clone(),
+                &cfg.file.endpoints,
+                &cfg.secrets,
+            )?)
+        }
     };
 
     let mut state = State::load(Path::new(&cfg.file.state.state_file))?;
@@ -162,6 +188,27 @@ async fn poll_once(
         state.set_bootstrapped();
         info!("bootstrap complete — only NEW trades will be copied from now on");
     }
+    Ok(())
+}
+
+/// Derive CLOB API credentials from the configured private key.
+async fn derive_creds(http: &Client, cfg: &Config) -> Result<crate::clob::DerivedCreds> {
+    let pk = cfg
+        .secrets
+        .private_key
+        .as_ref()
+        .ok_or_else(|| anyhow!("PM_PRIVATE_KEY is required to derive API credentials"))?;
+    let signer = OrderSigner::new(pk, cfg.file.endpoints.chain_id, &cfg.file.endpoints.exchange)?;
+    create_or_derive_api_creds(http, &cfg.file.endpoints.clob, &signer, 0).await
+}
+
+/// `derive-key` subcommand: print credentials ready to paste into `.env`.
+async fn derive_and_print(http: &Client, cfg: &Config) -> Result<()> {
+    let creds = derive_creds(http, cfg).await?;
+    println!("# CLOB API credentials derived from PM_PRIVATE_KEY — paste into .env:");
+    println!("PM_API_KEY={}", creds.api_key);
+    println!("PM_API_SECRET={}", creds.secret);
+    println!("PM_API_PASSPHRASE={}", creds.passphrase);
     Ok(())
 }
 

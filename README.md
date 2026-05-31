@@ -102,15 +102,22 @@ as `proxyWallet` in the activity feed.
 
    | Var | What |
    |---|---|
-   | `PM_PRIVATE_KEY` | EOA private key that signs orders |
-   | `PM_API_KEY` / `PM_API_SECRET` / `PM_API_PASSPHRASE` | CLOB L2 credentials |
+   | `PM_PRIVATE_KEY` | EOA private key that signs orders (**required**) |
+   | `PM_API_KEY` / `PM_API_SECRET` / `PM_API_PASSPHRASE` | CLOB L2 credentials (**optional** — auto-derived if blank) |
    | `PM_FUNDER_ADDRESS` | Fund-holding address (proxy/safe); blank for plain EOA |
    | `PM_SIGNATURE_TYPE` | `0` EOA, `1` email/magic proxy, `2` browser-wallet safe |
 
-3. **Getting CLOB API credentials**: derive them once with the official
-   [`py-clob-client`](https://github.com/Polymarket/py-clob-client)
-   (`client.create_or_derive_api_creds()`) using the same private key, or copy them
-   from the Polymarket UI. The bot expects them ready-made.
+3. **CLOB API credentials are handled for you.** If `PM_API_KEY` / `PM_API_SECRET`
+   / `PM_API_PASSPHRASE` are blank, the bot derives them from `PM_PRIVATE_KEY` at
+   startup (L1 `ClobAuth` signing — no `py-clob-client` needed). To print them
+   yourself, e.g. to pin them in `.env`:
+
+   ```bash
+   ./target/release/pmcopy derive-key
+   # PM_API_KEY=...
+   # PM_API_SECRET=...
+   # PM_API_PASSPHRASE=...
+   ```
 
 The order is signed as the Polymarket **CTF Exchange** EIP-712 `Order` struct
 (domain `Polymarket CTF Exchange` / v1 / chainId 137) and submitted as a `GTC`
@@ -133,8 +140,9 @@ src/
 │   ├── dry_run.rs     # logs decisions to a JSONL ledger
 │   └── clob.rs        # signs + submits real orders
 └── clob/
-    ├── signing.rs     # EIP-712 Order construction + signing (alloy)
+    ├── signing.rs     # EIP-712 Order + ClobAuth construction + signing (alloy)
     ├── auth.rs        # L2 HMAC-SHA256 POLY_* headers
+    ├── keys.rs        # derive/create API credentials from the key (L1 auth)
     └── client.rs      # authenticated POST /order
 ```
 
