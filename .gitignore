@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Secrets & local config
+.env
+config.toml
+
+# Runtime state / ledgers
+/data
+*.jsonl
+state.json
+*.log

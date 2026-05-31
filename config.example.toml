@@ -1,0 +1,55 @@
+# ===========================================================================
+# Polymarket copy-trading bot configuration
+# Copy to `config.toml` and edit. Secrets live in `.env`, not here.
+# ===========================================================================
+
+# "dry_run" = monitor + log copy decisions, place NO real orders (default, safe).
+# "live"    = sign and submit real orders via the CLOB. Requires .env credentials.
+mode = "dry_run"
+
+# Seconds between polls of each target's trade activity.
+poll_interval_secs = 8
+
+# ---------------------------------------------------------------------------
+# Position sizing — proportional to the target's trade size.
+#   our_shares = target_shares * copy_factor * target.weight
+# Then capped/floored by the USDC limits below.
+# ---------------------------------------------------------------------------
+copy_factor = 0.10        # follow at 10% of the target's size
+min_order_usdc = 1.0      # skip copies smaller than this (dust)
+max_order_usdc = 50.0     # never spend more than this on a single copy
+only_buys = false         # true = only mirror entries (BUY), ignore the target's exits
+
+# Marketable-limit slippage allowance, in basis points (100 = 1%).
+# BUY price is nudged up / SELL price down by this much so the order crosses.
+max_slippage_bps = 150
+
+# ---------------------------------------------------------------------------
+# Targets to follow. `address` is the trader's Polymarket wallet (proxy) address.
+# `weight` is an optional per-target multiplier on top of copy_factor (default 1.0).
+# ---------------------------------------------------------------------------
+[[targets]]
+address = "0x0000000000000000000000000000000000000000"
+weight = 1.0
+label = "example-trader"
+
+# [[targets]]
+# address = "0x..."
+# weight = 0.5
+# label = "conservative-whale"
+
+# ---------------------------------------------------------------------------
+# Endpoints (override only if Polymarket changes them).
+# ---------------------------------------------------------------------------
+[endpoints]
+data_api = "https://data-api.polymarket.com"
+clob = "https://clob.polymarket.com"
+chain_id = 137
+# Polymarket CTF Exchange (the EIP-712 verifying contract on Polygon mainnet).
+exchange = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+
+[state]
+# Where the bot remembers which trades it has already seen (dedup) and the
+# dry-run ledger of copy decisions.
+state_file = "data/state.json"
+ledger_file = "data/copies.jsonl"

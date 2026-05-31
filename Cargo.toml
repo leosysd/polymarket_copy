@@ -1,0 +1,40 @@
+[package]
+name = "polymarket_copy"
+version = "0.1.0"
+edition = "2021"
+authors = ["leosysd"]
+description = "Polymarket copy-trading bot — mirrors target wallets' trades proportionally onto your own account"
+license = "MIT"
+repository = "https://github.com/leosysd/polymarket_copy"
+
+[[bin]]
+name = "pmcopy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dotenvy = "0.15"
+anyhow = "1"
+thiserror = "1"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+
+# CLOB live-order signing (EIP-712) + L2 HMAC auth
+alloy = { version = "1.0", features = ["sol-types", "signer-local"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
