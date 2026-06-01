@@ -149,6 +149,7 @@ fn decode(log: &Log) -> Option<TargetTrade> {
             .map(|h| h.to_string())
             .unwrap_or_default(),
         log_index: log.log_index.unwrap_or_default(),
+        received_at: std::time::Instant::now(),
     })
 }
 

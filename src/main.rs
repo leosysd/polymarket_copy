@@ -203,16 +203,19 @@ async fn handle_trade(
     match sizing::build_order(trade, target, &cfg.file) {
         Ok(order) => match executor.execute(&order).await {
             Ok(out) => {
+                // Our own latency: from receiving the on-chain fill to submitting.
+                let proc_ms = trade.received_at.elapsed().as_millis();
                 info!(
                     side = order.side.as_str(),
                     shares = order.size_shares,
                     price = order.price,
                     usdc = format!("{:.2}", order.usdc),
                     submitted = out.submitted,
+                    proc_ms,
                     detail = %out.detail,
                     "COPY"
                 );
-                append_ledger(cfg, &order, &out);
+                append_ledger(cfg, &order, &out, proc_ms);
             }
             Err(e) => warn!(error = %e, key = %key, "order execution failed"),
         },
@@ -225,7 +228,7 @@ async fn handle_trade(
 
 /// Append one row to the JSONL ledger for every copy — dry-run or live alike,
 /// so there's always a record of what the bot did (and whether it submitted).
-fn append_ledger(cfg: &Config, order: &CopyOrder, out: &ExecOutcome) {
+fn append_ledger(cfg: &Config, order: &CopyOrder, out: &ExecOutcome, proc_ms: u128) {
     let row = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "mode": match cfg.file.mode { Mode::DryRun => "dry_run", Mode::Live => "live" },
@@ -235,6 +238,7 @@ fn append_ledger(cfg: &Config, order: &CopyOrder, out: &ExecOutcome) {
         "price": order.price,
         "ref_price": order.ref_price,
         "usdc": order.usdc,
+        "proc_ms": proc_ms,
         "token_id": order.token_id,
         "target_label": order.target_label,
         "detail": out.detail,

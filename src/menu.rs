@@ -593,13 +593,19 @@ fn show_ledger(config_path: &Path) -> Result<()> {
     println!("\n  最近 {} 笔跟单（{}）：", 15.min(lines.len()), path.display());
     for line in lines.iter().rev().take(15).rev() {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let tag = if v["submitted"].as_bool().unwrap_or(false) {
+                style("已下单").red()
+            } else {
+                style("模拟").green()
+            };
             println!(
-                "    {}  {} {} @ {}  (~{} USDC)  {}",
+                "    {}  [{tag}] {} {} @ {}  (~{} USDC)  本机{}ms  {}",
                 v["ts"].as_str().unwrap_or(""),
                 v["side"].as_str().unwrap_or(""),
                 v["size_shares"],
                 v["price"],
                 v["usdc"],
+                v["proc_ms"],
                 v["target_label"].as_str().unwrap_or("")
             );
         }

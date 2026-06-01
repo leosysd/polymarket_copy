@@ -41,6 +41,8 @@ pub struct TargetTrade {
     pub usdc: f64,
     pub tx_hash: String,
     pub log_index: u64,
+    /// When we received/decoded this fill — used to measure our own latency.
+    pub received_at: std::time::Instant,
 }
 
 impl TargetTrade {
