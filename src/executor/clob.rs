@@ -39,9 +39,11 @@ impl ClobExecutor {
             .context("parsing PM_PRIVATE_KEY")?
             .with_chain_id(Some(POLYGON));
 
+        // 0=EOA, 1=Proxy(email/magic), 2=GnosisSafe, 3=Poly1271(V2 deposit wallet).
         let sig_type = match secrets.signature_type {
             1 => SignatureType::Proxy,
             2 => SignatureType::GnosisSafe,
+            3 => SignatureType::Poly1271,
             _ => SignatureType::Eoa,
         };
 
@@ -79,8 +81,12 @@ impl OrderExecutor for ClobExecutor {
             Side::Buy => PmSide::Buy,
             Side::Sell => PmSide::Sell,
         };
-        let price = Decimal::try_from(order.price).context("price -> Decimal")?;
-        let size = Decimal::try_from(order.size_shares).context("size -> Decimal")?;
+        // Polymarket needs BUY notional (price*size) to be <= 2 decimals: price is
+        // 2-dec, so round size to an integer (matches the working JY bot).
+        let limit = (order.price * 100.0).round() / 100.0;
+        let order_shares = order.size_shares.round().max(1.0);
+        let price = Decimal::from_str(&format!("{limit:.2}")).context("price -> Decimal")?;
+        let size = Decimal::from_str(&format!("{order_shares:.0}")).context("size -> Decimal")?;
         let token_id =
             U256::from_str_radix(order.token_id.trim(), 10).context("token_id -> U256")?;
 
