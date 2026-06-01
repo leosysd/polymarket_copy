@@ -48,11 +48,12 @@ pub fn build_order(
         return Err(Skip::BelowMin { usdc });
     }
 
-    // Marketable-limit price: nudge so the order crosses the book.
-    let slip = cfg.max_slippage_bps as f64 / 10_000.0;
+    // Marketable-limit price: cross the book by an absolute offset (in price
+    // units), e.g. target 0.50 + 0.02 -> BUY limit 0.52.
+    let slip = cfg.max_slippage;
     let limit_price = match trade.side {
-        Side::Buy => (trade.price * (1.0 + slip)).min(0.999),
-        Side::Sell => (trade.price * (1.0 - slip)).max(0.001),
+        Side::Buy => (trade.price + slip).min(0.999),
+        Side::Sell => (trade.price - slip).max(0.001),
     };
     let limit_price = round_price(limit_price);
     let shares = round_shares(shares);

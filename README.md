@@ -38,7 +38,7 @@ were observed **~1 second** after they happened.
    Auto-reconnects on disconnect; dedups by `(tx_hash, log_index)`.
 2. **Sizing** (`sizing.rs`) — `our_shares = target_shares × copy_factor ×
    target.weight`, clamped by `min_order_usdc` / `max_order_usdc`. A
-   marketable-limit price is derived from the target's price ± `max_slippage_bps`.
+   marketable-limit price is the target's price ± `max_slippage` (absolute offset).
 3. **Execute** (`executor/`)
    - `dry_run`: appends the decision to a JSONL ledger and logs it. No writes.
    - `live`: builds the EIP-712 `Order`, signs it, and submits to the CLOB
@@ -93,7 +93,7 @@ are gitignored.
 | `min_order_usdc` | Skip copies smaller than this (dust filter) |
 | `max_order_usdc` | Hard ceiling on USDC per single copy |
 | `only_buys` | `true` = mirror entries only, ignore the target's exits |
-| `max_slippage_bps` | Marketable-limit slippage allowance (100 = 1%) |
+| `max_slippage` | Absolute price offset to cross the book (`0.02` → BUY 0.50 fills at 0.52) |
 | `order_type` | `FAK` (fill now, cancel rest — default), `FOK` (all-or-nothing), `GTC` (leftover rests) |
 | `[[targets]]` | `address`, optional `weight` (per-target multiplier) and `label` |
 | `endpoints.log_sources` | Contracts whose fills to watch (has a verified default) |

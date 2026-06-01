@@ -63,8 +63,10 @@ pub struct FileConfig {
     pub max_order_usdc: f64,
     #[serde(default)]
     pub only_buys: bool,
+    /// Absolute price offset to cross the book, in price units (e.g. 0.02 means
+    /// a BUY at target 0.50 is limited at 0.52, a SELL at 0.48).
     #[serde(default = "default_slippage")]
-    pub max_slippage_bps: u32,
+    pub max_slippage: f64,
     /// Order time-in-force: "FAK" (fill what crosses now, cancel the rest —
     /// recommended for fast markets), "FOK" (all-or-nothing immediate), or
     /// "GTC" (leftover rests on the book).
@@ -78,8 +80,8 @@ pub struct FileConfig {
 fn default_max_usdc() -> f64 {
     50.0
 }
-fn default_slippage() -> u32 {
-    150
+fn default_slippage() -> f64 {
+    0.02
 }
 fn default_order_type() -> String {
     "FAK".to_string()
