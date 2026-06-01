@@ -19,7 +19,9 @@ use polymarket_client_sdk_v2::types::{Decimal, U256};
 use polymarket_client_sdk_v2::POLYGON;
 use std::str::FromStr;
 
-const CLOB_V2_HOST: &str = "https://clob-v2.polymarket.com";
+// Note: clob-v2.polymarket.com 301-redirects (POST -> GET -> 405); the real
+// host that accepts authenticated POST /order is clob.polymarket.com.
+const CLOB_V2_HOST: &str = "https://clob.polymarket.com";
 
 pub struct ClobExecutor {
     client: Client<Authenticated<Normal>>,
