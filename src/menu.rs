@@ -598,24 +598,62 @@ fn show_ledger(config_path: &Path) -> Result<()> {
             return Ok(());
         }
     };
-    let lines: Vec<&str> = content.lines().collect();
-    println!("\n  最近 {} 笔跟单（{}）：", 15.min(lines.len()), path.display());
-    for line in lines.iter().rev().take(15).rev() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+    // Parse rows, keep the most recent ~200, group by market (preserving order
+    // of first appearance among the recent rows).
+    let rows: Vec<serde_json::Value> = content
+        .lines()
+        .rev()
+        .take(200)
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    if rows.is_empty() {
+        println!("  账本为空。");
+        return Ok(());
+    }
+
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<&serde_json::Value>> =
+        std::collections::HashMap::new();
+    for r in &rows {
+        let market = r["market"].as_str().filter(|s| !s.is_empty()).unwrap_or("(未知盘口)").to_string();
+        if !groups.contains_key(&market) {
+            order.push(market.clone());
+        }
+        groups.entry(market).or_default().push(r);
+    }
+
+    // Most recent markets last in `order`; show newest first, cap to 8 tables.
+    println!("\n  共 {} 个盘口、{} 笔跟单：", order.len(), rows.len());
+    for market in order.iter().rev().take(8) {
+        let items = &groups[market];
+        let n = items.len();
+        let total: f64 = items.iter().filter_map(|v| v["usdc"].as_f64()).sum();
+        println!("\n  {} {}  ({} 笔, 共 {:.2} USDC)", style("━━").cyan(), style(market).bold().cyan(), n, total);
+        println!(
+            "    {:<8} {:<5} {:<5} {:>6} {:>6} {:>7}  {}",
+            "时间", "方向", "结果", "份数", "限价", "USDC", "状态"
+        );
+        for v in items {
+            let ts = v["ts"].as_str().unwrap_or("");
+            let t = ts.get(11..19).unwrap_or(ts);
             let tag = if v["submitted"].as_bool().unwrap_or(false) {
                 style("已下单").red()
             } else {
                 style("模拟").green()
             };
             println!(
-                "    {}  [{tag}] {} {} @ {}  (~{} USDC)  本机{}ms  {}",
-                v["ts"].as_str().unwrap_or(""),
+                "    {:<8} {:<5} {:<5} {:>6} {:>6} {:>7.2}  {}",
+                t,
                 v["side"].as_str().unwrap_or(""),
-                v["size_shares"],
-                v["price"],
-                v["usdc"],
-                v["proc_ms"],
-                v["target_label"].as_str().unwrap_or("")
+                v["outcome"].as_str().unwrap_or("-"),
+                v["size_shares"].as_f64().unwrap_or(0.0),
+                v["price"].as_f64().unwrap_or(0.0),
+                v["usdc"].as_f64().unwrap_or(0.0),
+                tag,
             );
         }
     }

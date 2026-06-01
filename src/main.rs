@@ -137,14 +137,14 @@ async fn main() -> Result<()> {
     let mut trades = monitor.spawn();
 
     // token_id -> whether its market matches the filter (resolved once, cached).
-    let mut market_cache: HashMap<String, bool> = HashMap::new();
+    let mut slug_cache: HashMap<String, (String, String)> = HashMap::new();
 
     loop {
         tokio::select! {
             maybe_trade = trades.recv() => {
                 match maybe_trade {
                     Some(trade) => {
-                        handle_trade(&trade, &by_addr, &cfg, &mut state, executor.as_ref(), trade_enabled_at, &http, &mut market_cache).await;
+                        handle_trade(&trade, &by_addr, &cfg, &mut state, executor.as_ref(), trade_enabled_at, &http, &mut slug_cache).await;
                         if let Err(e) = state.save() {
                             warn!(error = %e, "failed to persist state");
                         }
@@ -174,7 +174,7 @@ async fn handle_trade(
     executor: &dyn OrderExecutor,
     trade_enabled_at: i64,
     http: &Client,
-    market_cache: &mut HashMap<String, bool>,
+    slug_cache: &mut HashMap<String, (String, String)>,
 ) {
     let key = trade.dedup_key();
     if state.has_seen(&key) {
@@ -190,22 +190,9 @@ async fn handle_trade(
     // Market filter: only copy fills whose market slug matches (e.g. btc-updown-5m).
     let filter = cfg.file.market_filter.trim().to_lowercase();
     if !filter.is_empty() {
-        let allowed = match market_cache.get(&trade.token_id) {
-            Some(&a) => a,
-            None => match resolve_slug(http, &cfg.file.endpoints.gamma, &trade.token_id).await {
-                Some(slug) => {
-                    let a = slug.to_lowercase().contains(&filter);
-                    market_cache.insert(trade.token_id.clone(), a);
-                    a
-                }
-                None => {
-                    debug!(token = %trade.token_id, "市场查询失败，跳过本笔");
-                    state.mark_seen(key);
-                    return;
-                }
-            },
-        };
-        if !allowed {
+        let (slug, _) =
+            cached_market(http, &cfg.file.endpoints.gamma, &trade.token_id, slug_cache).await;
+        if !slug.to_lowercase().contains(&filter) {
             debug!(target = %trade.target, "非目标市场，跳过");
             state.mark_seen(key);
             return;
@@ -245,7 +232,11 @@ async fn handle_trade(
                     detail = %out.detail,
                     "COPY"
                 );
-                append_ledger(cfg, &order, &out, proc_ms);
+                // Resolve the market now (it's live) and store slug+outcome in the
+                // ledger so the menu can group copies into per-market tables.
+                let (market, outcome) =
+                    cached_market(http, &cfg.file.endpoints.gamma, &order.token_id, slug_cache).await;
+                append_ledger(cfg, &order, &out, proc_ms, &market, &outcome);
             }
             Err(e) => warn!(error = %e, key = %key, "order execution failed"),
         },
@@ -256,22 +247,55 @@ async fn handle_trade(
     state.mark_seen(key);
 }
 
-/// Resolve a CLOB token id to its market slug via the Gamma API.
-async fn resolve_slug(http: &Client, gamma: &str, token_id: &str) -> Option<String> {
+/// Resolve a CLOB token id to (market slug, outcome) via the Gamma API.
+async fn resolve_market(http: &Client, gamma: &str, token_id: &str) -> Option<(String, String)> {
     let url = format!("{}/markets?clob_token_ids={}", gamma.trim_end_matches('/'), token_id);
     let resp = http.get(&url).send().await.ok()?;
     let text = resp.text().await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get(0)?.get("slug")?.as_str().map(|s| s.to_string())
+    let m = v.get(0)?;
+    let slug = m.get("slug")?.as_str()?.to_string();
+    // outcomes/clobTokenIds are JSON-encoded string arrays, parallel by index.
+    let outcome = (|| {
+        let ids: Vec<String> = serde_json::from_str(m.get("clobTokenIds")?.as_str()?).ok()?;
+        let outs: Vec<String> = serde_json::from_str(m.get("outcomes")?.as_str()?).ok()?;
+        outs.get(ids.iter().position(|i| i == token_id)?).cloned()
+    })()
+    .unwrap_or_default();
+    Some((slug, outcome))
+}
+
+/// Cached token_id -> (slug, outcome). One gamma call per token.
+async fn cached_market(
+    http: &Client,
+    gamma: &str,
+    token_id: &str,
+    cache: &mut HashMap<String, (String, String)>,
+) -> (String, String) {
+    if let Some(v) = cache.get(token_id) {
+        return v.clone();
+    }
+    let v = resolve_market(http, gamma, token_id).await.unwrap_or_default();
+    cache.insert(token_id.to_string(), v.clone());
+    v
 }
 
 /// Append one row to the JSONL ledger for every copy — dry-run or live alike,
 /// so there's always a record of what the bot did (and whether it submitted).
-fn append_ledger(cfg: &Config, order: &CopyOrder, out: &ExecOutcome, proc_ms: u128) {
+fn append_ledger(
+    cfg: &Config,
+    order: &CopyOrder,
+    out: &ExecOutcome,
+    proc_ms: u128,
+    market: &str,
+    outcome: &str,
+) {
     let row = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "mode": match cfg.file.mode { Mode::DryRun => "dry_run", Mode::Live => "live" },
         "submitted": out.submitted,
+        "market": market,
+        "outcome": outcome,
         "side": order.side.as_str(),
         "size_shares": order.size_shares,
         "price": order.price,
