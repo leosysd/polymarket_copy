@@ -1,84 +1,54 @@
 # polymarket_copy
 
-Low-latency copy-trading bot for [Polymarket](https://polymarket.com), in Rust.
-Watches target wallets via on-chain event subscription and mirrors their trades
-onto your account, sized proportionally. Defaults to **dry-run** (logs only, no
-real orders).
+Polymarket 跟单机器人（Rust）。链上实时监听目标钱包的成交，按比例自动跟单。
+默认 **dry_run**（只记录、不真实下单）。
 
-## Install
+## 安装
 
-Needs [Rust](https://rustup.rs) and a Polygon **WebSocket** RPC URL
-(`wss://…` — free from [Alchemy](https://www.alchemy.com), Infura, etc.).
+需要 [Rust](https://rustup.rs) 和一个 Polygon 的 **WebSocket** RPC 地址
+（`wss://…`，[Alchemy](https://www.alchemy.com) 免费档即可）。
 
 ```bash
 git clone https://github.com/leosysd/polymarket_copy.git
 cd polymarket_copy
-cargo build --release          # binary at target/release/pmcopy
+cargo build --release                 # 编译，产物在 target/release/pmcopy
 
-cp config.example.toml config.toml   # set your target wallet address(es)
-cp .env.example .env                 # set PM_WSS_RPC=wss://...
+cp config.example.toml config.toml    # 填目标钱包地址、跟单比例等
+cp .env.example .env                  # 填 PM_WSS_RPC=wss://...
 ```
 
-## Usage
+## 使用
 
 ```bash
-# interactive management menu — configure, manage targets, control the
-# service, view the ledger, derive keys (recommended; arrow keys to navigate)
-./target/release/pmcopy menu
-
-# run the bot directly (dry-run by default)
-./target/release/pmcopy
-
-# use a specific config file
-./target/release/pmcopy --config /path/to/config.toml
-
-# print CLOB API credentials for .env (live mode only)
-./target/release/pmcopy derive-key
-
-# all options
-./target/release/pmcopy --help
+./target/release/pmcopy menu     # 交互式中文菜单（推荐：改配置、管目标、看账本、控服务）
+./target/release/pmcopy          # 直接运行（默认 dry_run，只记录不下单）
 ```
 
-Copy decisions are written to `data/copies.jsonl` — `tail -f` it to watch.
+开实盘：菜单里把 `mode` 改成 `live`，并在 `.env` 填 `PM_PRIVATE_KEY`（API 凭证会自动派生）。
+建议先用很小的 `copy_factor` 试。
 
-**Key settings** (`config.toml`):
-
-| Setting | Meaning |
-|---|---|
-| `mode` | `dry_run` (default) or `live` |
-| `copy_factor` | size multiplier — `0.25` = follow at 25% of the target's size |
-| `max_slippage` | price offset to cross — `0.02` → target 0.50 fills at 0.52 |
-| `order_type` | `FAK` (fill now, cancel rest), `FOK`, or `GTC` |
-| `min_order_usdc` / `max_order_usdc` | per-copy floor / ceiling |
-| `[[targets]]` | wallet `address` to follow (+ optional `weight`, `label`) |
-
-To go **live**, set `mode = "live"` and put `PM_PRIVATE_KEY` in `.env`
-(API credentials are auto-derived). Start with a small `copy_factor`.
-
-### Run as a service (VPS)
+可选：作为后台服务常驻（VPS）
 
 ```bash
 sudo cp deploy/pmcopy.service /etc/systemd/system/
-sudo nano /etc/systemd/system/pmcopy.service   # set User=
+sudo nano /etc/systemd/system/pmcopy.service    # 改 User=
 sudo systemctl enable --now pmcopy
-journalctl -u pmcopy -f                         # view logs
 ```
 
-## Uninstall
+## 卸载
 
 ```bash
-# if installed as a service:
+# 如果装了后台服务：
 sudo systemctl disable --now pmcopy
 sudo rm /etc/systemd/system/pmcopy.service
 sudo systemctl daemon-reload
 
-# remove the bot
+# 删掉程序目录：
 rm -rf ~/polymarket_copy
 ```
 
-There is nothing else to clean up — no system files, no database. Just remember
-to revoke the CLOB API key if you created one.
+没有别的系统文件或数据库要清理。如果创建过 CLOB API key，记得去 Polymarket 吊销。
 
-## License
+---
 
-MIT — provided as-is, no warranty. Copy-trading is risky; you can lose money.
+MIT 许可，按现状提供，不作担保。跟单有风险，可能亏损。
