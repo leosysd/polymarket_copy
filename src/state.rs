@@ -71,9 +71,14 @@ impl State {
         };
         let json = serde_json::to_string(&file)?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("renaming into {}", self.path.display()))?;
+        std::fs::write(&tmp, &json).with_context(|| format!("writing {}", tmp.display()))?;
+        // Prefer atomic rename; if that fails (some filesystems), fall back to a
+        // direct write so state still persists.
+        if std::fs::rename(&tmp, &self.path).is_err() {
+            std::fs::write(&self.path, &json)
+                .with_context(|| format!("writing {}", self.path.display()))?;
+            let _ = std::fs::remove_file(&tmp);
+        }
         self.dirty = false;
         Ok(())
     }
