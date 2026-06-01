@@ -29,9 +29,10 @@ max_slippage = 0.02
 #   "GTC" = leftover rests on the book as a limit order.
 order_type = "FAK"
 
-# 只复制「市场 slug 含此关键词」的成交（不区分大小写）。
-# 默认只跟 BTC 5 分钟市场；留空 "" = 跟目标在所有市场的交易。
-market_filter = "btc-updown-5m"
+# 市场过滤：只复制「市场 slug 含此关键词」的成交（不区分大小写）。
+# 留空 "" = 不过滤，跟目标在所有市场的交易（默认）。
+# 想只跟 BTC 5 分钟就填 "btc-updown-5m"。
+market_filter = ""
 
 # ---------------------------------------------------------------------------
 # Targets to follow. `address` is the trader's Polymarket wallet (the order

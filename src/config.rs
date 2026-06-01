@@ -94,7 +94,8 @@ fn default_order_type() -> String {
     "FAK".to_string()
 }
 fn default_market_filter() -> String {
-    "btc-updown-5m".to_string()
+    // Empty = no market filtering (copy all of the target's trades).
+    String::new()
 }
 fn default_gamma() -> String {
     "https://gamma-api.polymarket.com".to_string()
