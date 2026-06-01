@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
                 http.clone(),
                 &cfg.file.endpoints,
                 &cfg.secrets,
+                cfg.file.order_type.clone(),
             )?)
         }
     };

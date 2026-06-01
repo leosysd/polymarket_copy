@@ -15,10 +15,17 @@ pub struct ClobExecutor {
     /// The fund-holding address ("maker"); equals the signer for EOA accounts.
     maker: Address,
     signature_type: u8,
+    /// Time-in-force sent to the CLOB (FAK / FOK / GTC / GTD).
+    order_type: String,
 }
 
 impl ClobExecutor {
-    pub fn new(http: Client, endpoints: &Endpoints, secrets: &Secrets) -> Result<ClobExecutor> {
+    pub fn new(
+        http: Client,
+        endpoints: &Endpoints,
+        secrets: &Secrets,
+        order_type: String,
+    ) -> Result<ClobExecutor> {
         let pk = secrets
             .private_key
             .as_ref()
@@ -46,6 +53,7 @@ impl ClobExecutor {
             client,
             maker,
             signature_type: secrets.signature_type,
+            order_type,
         })
     }
 }
@@ -80,9 +88,9 @@ impl OrderExecutor for ClobExecutor {
         };
 
         let payload = self.signer.sign(&inputs)?;
-        // GTC marketable-limit: crosses immediately at our slipped price, and
-        // any unfilled remainder rests on the book.
-        let resp = self.client.post_order(&payload, "GTC").await?;
+        // Marketable-limit at our slipped price. With FAK, whatever crosses now
+        // fills and the remainder is cancelled (no resting order left behind).
+        let resp = self.client.post_order(&payload, &self.order_type).await?;
 
         Ok(ExecOutcome {
             submitted: true,

@@ -19,7 +19,15 @@ only_buys = false         # true = only mirror entries (BUY), ignore the target'
 
 # Marketable-limit slippage allowance, in basis points (100 = 1%).
 # BUY price is nudged up / SELL price down by this much so the order crosses.
+# e.g. target fill 0.500 with 150 bps -> limit 0.51; use ~500 for 0.52-0.53.
 max_slippage_bps = 150
+
+# Order time-in-force:
+#   "FAK" = fill whatever crosses immediately, cancel the rest (recommended for
+#           fast 5-minute markets — never leaves a resting order behind).
+#   "FOK" = all-or-nothing, immediate.
+#   "GTC" = leftover rests on the book as a limit order.
+order_type = "FAK"
 
 # ---------------------------------------------------------------------------
 # Targets to follow. `address` is the trader's Polymarket wallet (the order

@@ -94,6 +94,7 @@ are gitignored.
 | `max_order_usdc` | Hard ceiling on USDC per single copy |
 | `only_buys` | `true` = mirror entries only, ignore the target's exits |
 | `max_slippage_bps` | Marketable-limit slippage allowance (100 = 1%) |
+| `order_type` | `FAK` (fill now, cancel rest — default), `FOK` (all-or-nothing), `GTC` (leftover rests) |
 | `[[targets]]` | `address`, optional `weight` (per-target multiplier) and `label` |
 | `endpoints.log_sources` | Contracts whose fills to watch (has a verified default) |
 

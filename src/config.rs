@@ -65,6 +65,11 @@ pub struct FileConfig {
     pub only_buys: bool,
     #[serde(default = "default_slippage")]
     pub max_slippage_bps: u32,
+    /// Order time-in-force: "FAK" (fill what crosses now, cancel the rest —
+    /// recommended for fast markets), "FOK" (all-or-nothing immediate), or
+    /// "GTC" (leftover rests on the book).
+    #[serde(default = "default_order_type")]
+    pub order_type: String,
     pub targets: Vec<Target>,
     pub endpoints: Endpoints,
     pub state: StatePaths,
@@ -75,6 +80,9 @@ fn default_max_usdc() -> f64 {
 }
 fn default_slippage() -> u32 {
     150
+}
+fn default_order_type() -> String {
+    "FAK".to_string()
 }
 
 /// Secrets pulled from the environment.
@@ -104,11 +112,18 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;
-        let file: FileConfig =
+        let mut file: FileConfig =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
 
         if file.copy_factor <= 0.0 {
             return Err(anyhow!("copy_factor must be > 0"));
+        }
+        file.order_type = file.order_type.to_uppercase();
+        if !matches!(file.order_type.as_str(), "FAK" | "FOK" | "GTC" | "GTD") {
+            return Err(anyhow!(
+                "order_type must be one of FAK, FOK, GTC, GTD (got {})",
+                file.order_type
+            ));
         }
         if file.targets.is_empty() {
             return Err(anyhow!("no targets configured"));
