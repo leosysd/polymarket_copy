@@ -5,7 +5,7 @@
 
 use crate::clob::{create_or_derive_api_creds, OrderSigner};
 use anyhow::{anyhow, Context, Result};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use reqwest::Client;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,7 +24,8 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
 
         let items = [
             "状态",
-            "设置（模式 / 份数 / 滑点 / 订单类型）",
+            "设置（模式 / 份数 / 滑点 / 订单类型 / 金额）",
+            "连接与密钥（WS 节点 / 私钥 / 资金地址）",
             "目标钱包（添加 / 删除）",
             "服务（systemd 启动 / 停止 / 重启）",
             "账本（最近跟单）",
@@ -41,11 +42,12 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
         match choice {
             0 => status(config_path)?,
             1 => settings_menu(config_path, &theme)?,
-            2 => targets_menu(config_path, &theme)?,
-            3 => service_menu(&theme)?,
-            4 => show_ledger(config_path)?,
-            5 => derive_key(config_path, http).await?,
-            6 => run_foreground(config_path)?,
+            2 => env_menu(&theme)?,
+            3 => targets_menu(config_path, &theme)?,
+            4 => service_menu(&theme)?,
+            5 => show_ledger(config_path)?,
+            6 => derive_key(config_path, http).await?,
+            7 => run_foreground(config_path)?,
             _ => break,
         }
     }
@@ -168,6 +170,67 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
 fn prompt_f64(theme: &ColorfulTheme, prompt: &str) -> Result<f64> {
     let s: String = Input::with_theme(theme).with_prompt(prompt).interact_text()?;
     s.trim().parse().context("不是有效数字")
+}
+
+// ---------------------------------------------------------------------------
+// 连接与密钥（.env）
+// ---------------------------------------------------------------------------
+
+fn env_menu(theme: &ColorfulTheme) -> Result<()> {
+    loop {
+        let sig = std::env::var("PM_SIGNATURE_TYPE").unwrap_or_else(|_| "0".into());
+        let items = [
+            format!("PM_WSS_RPC（Polygon wss 节点）        [{}]", env_set("PM_WSS_RPC")),
+            format!("PM_PRIVATE_KEY（下单私钥）            [{}]", env_set("PM_PRIVATE_KEY")),
+            format!("PM_FUNDER_ADDRESS（资金地址，可空）   [{}]", env_set("PM_FUNDER_ADDRESS")),
+            format!("PM_SIGNATURE_TYPE（账户类型）         [{sig}]"),
+            "返回".to_string(),
+        ];
+        let choice = Select::with_theme(theme)
+            .with_prompt("连接与密钥 (.env)")
+            .items(&items)
+            .default(0)
+            .interact()?;
+        match choice {
+            0 => {
+                let v: String = Input::with_theme(theme)
+                    .with_prompt("PM_WSS_RPC (wss://...)")
+                    .interact_text()?;
+                set_secret("PM_WSS_RPC", v.trim())?;
+            }
+            1 => {
+                let v: String = Password::with_theme(theme)
+                    .with_prompt("PM_PRIVATE_KEY (0x...，输入时不显示)")
+                    .interact()?;
+                set_secret("PM_PRIVATE_KEY", v.trim())?;
+            }
+            2 => {
+                let v: String = Input::with_theme(theme)
+                    .with_prompt("PM_FUNDER_ADDRESS (留空=用私钥地址)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                set_secret("PM_FUNDER_ADDRESS", v.trim())?;
+            }
+            3 => {
+                let opts = ["0  普通钱包 (EOA)", "1  邮箱/Magic 代理", "2  浏览器钱包 (Safe)"];
+                let i = Select::with_theme(theme)
+                    .with_prompt("PM_SIGNATURE_TYPE")
+                    .items(&opts)
+                    .default(0)
+                    .interact()?;
+                set_secret("PM_SIGNATURE_TYPE", &i.to_string())?;
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
+/// 写入 .env，并同步到当前进程环境（让状态显示立即生效）。
+fn set_secret(key: &str, val: &str) -> Result<()> {
+    set_env_var(key, val)?;
+    std::env::set_var(key, val);
+    println!("  已写入 {ENV_PATH}");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
