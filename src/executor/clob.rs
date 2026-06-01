@@ -1,100 +1,102 @@
-//! Live executor: signs and submits real orders through the Polymarket CLOB.
+//! Live executor: creates, signs and submits orders via the official Polymarket
+//! Rust SDK (`polymarket_client_sdk_v2`) against the CLOB v2 endpoint. This
+//! replaces the hand-rolled EIP-712 signing, which produced V1-format orders the
+//! V2 CLOB rejected ("Invalid order payload").
 
 use super::{ExecOutcome, OrderExecutor};
-use crate::clob::{ClobClient, L2Creds, OrderInputs, OrderSigner};
-use crate::config::{Endpoints, Secrets};
+use crate::config::Secrets;
 use crate::models::{CopyOrder, Side};
 use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use reqwest::Client;
+use polymarket_client_sdk_v2::auth::state::Authenticated;
+use polymarket_client_sdk_v2::auth::Normal;
+use polymarket_client_sdk_v2::clob::types::{OrderType, SignatureType, Side as PmSide};
+use polymarket_client_sdk_v2::clob::{Client, Config};
+use polymarket_client_sdk_v2::types::{Decimal, U256};
+use polymarket_client_sdk_v2::POLYGON;
+use std::str::FromStr;
+
+const CLOB_V2_HOST: &str = "https://clob-v2.polymarket.com";
 
 pub struct ClobExecutor {
-    signer: OrderSigner,
-    client: ClobClient,
-    /// The fund-holding address ("maker"); equals the signer for EOA accounts.
-    maker: Address,
-    signature_type: u8,
-    /// Time-in-force sent to the CLOB (FAK / FOK / GTC / GTD).
-    order_type: String,
+    client: Client<Authenticated<Normal>>,
+    signer: PrivateKeySigner,
+    order_type: OrderType,
 }
 
 impl ClobExecutor {
-    pub fn new(
-        http: Client,
-        endpoints: &Endpoints,
-        secrets: &Secrets,
-        order_type: String,
-    ) -> Result<ClobExecutor> {
+    pub async fn new(secrets: &Secrets, order_type: &str) -> Result<ClobExecutor> {
         let pk = secrets
             .private_key
             .as_ref()
             .ok_or_else(|| anyhow!("missing PM_PRIVATE_KEY"))?;
-        let signer = OrderSigner::new(pk, endpoints.chain_id, &endpoints.exchange)?;
-        let signer_addr = signer.address();
+        let signer = PrivateKeySigner::from_str(pk.trim())
+            .context("parsing PM_PRIVATE_KEY")?
+            .with_chain_id(Some(POLYGON));
 
-        let maker = match secrets.funder_address.as_deref() {
-            Some(a) if !a.trim().is_empty() => {
-                a.trim().parse().context("parsing PM_FUNDER_ADDRESS")?
-            }
-            _ => signer_addr,
+        let sig_type = match secrets.signature_type {
+            1 => SignatureType::Proxy,
+            2 => SignatureType::GnosisSafe,
+            _ => SignatureType::Eoa,
         };
 
-        let creds = L2Creds {
-            api_key: secrets.api_key.clone().unwrap_or_default(),
-            secret: secrets.api_secret.clone().unwrap_or_default(),
-            passphrase: secrets.api_passphrase.clone().unwrap_or_default(),
-            address: signer_addr.to_checksum(None),
+        let mut builder = Client::new(CLOB_V2_HOST, Config::default())?
+            .authentication_builder(&signer)
+            .signature_type(sig_type);
+        if let Some(f) = secrets
+            .funder_address
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let addr = Address::from_str(f.trim()).context("parsing PM_FUNDER_ADDRESS")?;
+            builder = builder.funder(addr);
+        }
+        let client = builder.authenticate().await?;
+
+        let order_type = match order_type.to_uppercase().as_str() {
+            "FOK" => OrderType::FOK,
+            "GTC" => OrderType::GTC,
+            _ => OrderType::FAK,
         };
-        let client = ClobClient::new(http, endpoints.clob.clone(), creds);
 
         Ok(ClobExecutor {
-            signer,
             client,
-            maker,
-            signature_type: secrets.signature_type,
+            signer,
             order_type,
         })
     }
 }
 
-/// USDC and conditional tokens both use 6 decimals on Polymarket.
-fn to_base_units(amount: f64) -> u128 {
-    (amount * 1_000_000.0).round().max(0.0) as u128
-}
-
 #[async_trait]
 impl OrderExecutor for ClobExecutor {
     async fn execute(&self, order: &CopyOrder) -> Result<ExecOutcome> {
-        let shares = order.size_shares;
-        let notional = order.price * shares;
-
-        // BUY: pay USDC (maker) to receive shares (taker).
-        // SELL: give shares (maker) to receive USDC (taker).
-        let (maker_amount, taker_amount) = match order.side {
-            Side::Buy => (to_base_units(notional), to_base_units(shares)),
-            Side::Sell => (to_base_units(shares), to_base_units(notional)),
+        let side = match order.side {
+            Side::Buy => PmSide::Buy,
+            Side::Sell => PmSide::Sell,
         };
+        let price = Decimal::try_from(order.price).context("price -> Decimal")?;
+        let size = Decimal::try_from(order.size_shares).context("size -> Decimal")?;
+        let token_id =
+            U256::from_str_radix(order.token_id.trim(), 10).context("token_id -> U256")?;
 
-        let inputs = OrderInputs {
-            token_id: order.token_id.clone(),
-            side: order.side,
-            maker_amount,
-            taker_amount,
-            maker: self.maker,
-            signer: self.signer.address(),
-            signature_type: self.signature_type,
-            fee_rate_bps: 0,
-        };
-
-        let payload = self.signer.sign(&inputs)?;
-        // Marketable-limit at our slipped price. With FAK, whatever crosses now
-        // fills and the remainder is cancelled (no resting order left behind).
-        let resp = self.client.post_order(&payload, &self.order_type).await?;
+        // build + sign + post in one call (handles tick size, neg-risk, contracts).
+        let resp = self
+            .client
+            .limit_order()
+            .token_id(token_id)
+            .size(size)
+            .price(price)
+            .side(side)
+            .order_type(self.order_type.clone())
+            .build_sign_and_post(&self.signer)
+            .await?;
 
         Ok(ExecOutcome {
             submitted: true,
-            detail: format!("CLOB accepted: {resp}"),
+            detail: format!("CLOB v2 accepted: {resp:?}"),
         })
     }
 

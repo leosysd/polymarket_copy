@@ -37,6 +37,10 @@ alloy = { version = "1.0", features = [
     "rpc-types",
 ] }
 futures-util = "0.3"
+# Official Polymarket Rust CLOB v2 client — order creation + signing.
+polymarket_client_sdk_v2 = { version = "=0.6.0-canary.1", features = ["clob"] }
+rust_decimal = "1"
+rust_decimal_macros = "1"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"

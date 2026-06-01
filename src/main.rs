@@ -80,20 +80,10 @@ async fn main() -> Result<()> {
     let executor: Box<dyn OrderExecutor> = match cfg.file.mode {
         Mode::DryRun => Box::new(DryRunExecutor::new()),
         Mode::Live => {
-            if cfg.needs_api_creds() {
-                info!("CLOB API credentials not set — deriving from PM_PRIVATE_KEY");
-                let creds = derive_creds(&http, &cfg).await?;
-                cfg.secrets.api_key = Some(creds.api_key);
-                cfg.secrets.api_secret = Some(creds.secret);
-                cfg.secrets.api_passphrase = Some(creds.passphrase);
-                info!("derived CLOB API key successfully");
-            }
-            Box::new(ClobExecutor::new(
-                http.clone(),
-                &cfg.file.endpoints,
-                &cfg.secrets,
-                cfg.file.order_type.clone(),
-            )?)
+            info!("authenticating with Polymarket CLOB v2 (official SDK)...");
+            let exec = ClobExecutor::new(&cfg.secrets, &cfg.file.order_type).await?;
+            info!("CLOB v2 authenticated");
+            Box::new(exec)
         }
     };
 
