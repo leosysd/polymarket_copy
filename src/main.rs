@@ -15,8 +15,8 @@ mod state;
 
 use crate::clob::{create_or_derive_api_creds, OrderSigner};
 use crate::config::{Config, Mode, Target};
-use crate::executor::{ClobExecutor, DryRunExecutor, OrderExecutor};
-use crate::models::TargetTrade;
+use crate::executor::{ClobExecutor, DryRunExecutor, ExecOutcome, OrderExecutor};
+use crate::models::{CopyOrder, TargetTrade};
 use crate::monitor::ChainMonitor;
 use crate::state::State;
 use alloy::primitives::Address;
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         .collect();
 
     let executor: Box<dyn OrderExecutor> = match cfg.file.mode {
-        Mode::DryRun => Box::new(DryRunExecutor::new(PathBuf::from(&cfg.file.state.ledger_file))),
+        Mode::DryRun => Box::new(DryRunExecutor::new()),
         Mode::Live => {
             if cfg.needs_api_creds() {
                 info!("CLOB API credentials not set — deriving from PM_PRIVATE_KEY");
@@ -202,15 +202,18 @@ async fn handle_trade(
 
     match sizing::build_order(trade, target, &cfg.file) {
         Ok(order) => match executor.execute(&order).await {
-            Ok(out) => info!(
-                side = order.side.as_str(),
-                shares = order.size_shares,
-                price = order.price,
-                usdc = format!("{:.2}", order.usdc),
-                submitted = out.submitted,
-                detail = %out.detail,
-                "COPY"
-            ),
+            Ok(out) => {
+                info!(
+                    side = order.side.as_str(),
+                    shares = order.size_shares,
+                    price = order.price,
+                    usdc = format!("{:.2}", order.usdc),
+                    submitted = out.submitted,
+                    detail = %out.detail,
+                    "COPY"
+                );
+                append_ledger(cfg, &order, &out);
+            }
             Err(e) => warn!(error = %e, key = %key, "order execution failed"),
         },
         Err(skip) => debug!(reason = %skip, "skip trade"),
@@ -218,6 +221,37 @@ async fn handle_trade(
 
     // Mark seen after the attempt so a restart never double-submits.
     state.mark_seen(key);
+}
+
+/// Append one row to the JSONL ledger for every copy — dry-run or live alike,
+/// so there's always a record of what the bot did (and whether it submitted).
+fn append_ledger(cfg: &Config, order: &CopyOrder, out: &ExecOutcome) {
+    let row = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "mode": match cfg.file.mode { Mode::DryRun => "dry_run", Mode::Live => "live" },
+        "submitted": out.submitted,
+        "side": order.side.as_str(),
+        "size_shares": order.size_shares,
+        "price": order.price,
+        "ref_price": order.ref_price,
+        "usdc": order.usdc,
+        "token_id": order.token_id,
+        "target_label": order.target_label,
+        "detail": out.detail,
+    });
+    let path = Path::new(&cfg.file.state.ledger_file);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).ok();
+        }
+    }
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => {
+            let _ = writeln!(f, "{row}");
+        }
+        Err(e) => warn!(error = %e, "failed to write ledger"),
+    }
 }
 
 fn parse_addresses(raw: &[String]) -> Result<Vec<Address>> {

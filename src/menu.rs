@@ -31,7 +31,8 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
             "🔌  连接（节点 / 私钥）",
             "🎯  跟单地址（添加 / 删除）",
             "🚀  服务（安装 / 启停 / 重启）",
-            "📒  账本（最近跟单）",
+            "📜  实时日志（跟随，看有没有下单）",
+            "📒  账本（最近跟单汇总）",
             "🔑  派生 API key",
             "▶   立即运行（前台）",
             "⬆️   更新程序",
@@ -49,10 +50,11 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
             2 => env_menu(&theme)?,
             3 => targets_menu(config_path, &theme)?,
             4 => service_menu(config_path, &theme)?,
-            5 => show_ledger(config_path)?,
-            6 => derive_key(config_path, http).await?,
-            7 => run_foreground(config_path)?,
-            8 => update_self(&theme)?,
+            5 => follow_log(config_path)?,
+            6 => show_ledger(config_path)?,
+            7 => derive_key(config_path, http).await?,
+            8 => run_foreground(config_path)?,
+            9 => update_self(&theme)?,
             _ => break,
         }
     }
@@ -550,6 +552,32 @@ fn run_cmd(bin: &str, args: &[&str]) {
 // ---------------------------------------------------------------------------
 // 账本
 // ---------------------------------------------------------------------------
+
+/// 实时日志：服务在跑就跟随完整日志，否则跟随账本（跟单记录）。
+fn follow_log(config_path: &Path) -> Result<()> {
+    if service_installed() && service_running() {
+        println!("\n  跟随服务日志（Ctrl-C 退出）...\n");
+        run_cmd("journalctl", &["-u", SERVICE, "-n", "50", "-f", "--no-pager"]);
+        return Ok(());
+    }
+    let doc = load_doc(config_path)?;
+    let path = ledger_path(&doc);
+    if let Some(p) = path.parent() {
+        if !p.as_os_str().is_empty() {
+            std::fs::create_dir_all(p).ok();
+        }
+    }
+    if !path.exists() {
+        std::fs::write(&path, "").ok();
+    }
+    println!("\n  跟随跟单记录 {}（Ctrl-C 退出）", path.display());
+    println!(
+        "  {}",
+        style("提示：bot 要在别处运行（服务/前台）才会有新记录；装成服务后这里能看完整实时日志").dim()
+    );
+    run_cmd("tail", &["-n", "20", "-f", path.to_str().unwrap_or("data/copies.jsonl")]);
+    Ok(())
+}
 
 fn show_ledger(config_path: &Path) -> Result<()> {
     let doc = load_doc(config_path)?;
