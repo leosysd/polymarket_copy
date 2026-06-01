@@ -1,8 +1,8 @@
-//! Polymarket copy-trading bot.
+//! Polymarket copy-trading bot (low-latency, on-chain).
 //!
-//! Polls one or more target wallets' trade activity and mirrors each new trade
-//! onto your own account, scaled proportionally to the target's size. Runs in
-//! DRY_RUN by default (logs decisions, places no orders).
+//! Subscribes to Polygon `OrderFilled` events for one or more target wallets and
+//! mirrors each new fill onto your own account, scaled proportionally to the
+//! target's size. Runs in DRY_RUN by default (logs decisions, places no orders).
 
 mod clob;
 mod config;
@@ -13,28 +13,27 @@ mod sizing;
 mod state;
 
 use crate::clob::{create_or_derive_api_creds, OrderSigner};
-use crate::config::{Config, Mode};
+use crate::config::{Config, Mode, Target};
 use crate::executor::{ClobExecutor, DryRunExecutor, OrderExecutor};
-use crate::monitor::Monitor;
+use crate::models::TargetTrade;
+use crate::monitor::ChainMonitor;
 use crate::state::State;
-use anyhow::{anyhow, Result};
+use alloy::primitives::Address;
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use reqwest::Client;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::signal;
 use tracing::{debug, info, warn};
 
 #[derive(Parser, Debug)]
-#[command(name = "pmcopy", about = "Polymarket copy-trading bot")]
+#[command(name = "pmcopy", about = "Polymarket copy-trading bot (on-chain, low-latency)")]
 struct Args {
     /// Path to the TOML config file.
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
-
-    /// Run a single poll cycle and exit (useful for testing).
-    #[arg(long)]
-    once: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -58,17 +57,21 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(20))
         .build()?;
 
-    // Subcommand: derive credentials and print them, then exit.
     if let Some(Command::DeriveKey) = args.command {
         return derive_and_print(&http, &cfg).await;
     }
 
-    let monitor = Monitor::new(http.clone(), cfg.file.endpoints.data_api.clone());
+    // Index targets by lowercased address for quick lookup from on-chain events.
+    let by_addr: HashMap<String, Target> = cfg
+        .file
+        .targets
+        .iter()
+        .map(|t| (t.address.to_lowercase(), t.clone()))
+        .collect();
 
     let executor: Box<dyn OrderExecutor> = match cfg.file.mode {
         Mode::DryRun => Box::new(DryRunExecutor::new(PathBuf::from(&cfg.file.state.ledger_file))),
         Mode::Live => {
-            // Auto-derive CLOB API credentials from the private key if absent.
             if cfg.needs_api_creds() {
                 info!("CLOB API credentials not set — deriving from PM_PRIVATE_KEY");
                 let creds = derive_creds(&http, &cfg).await?;
@@ -87,32 +90,48 @@ async fn main() -> Result<()> {
 
     let mut state = State::load(Path::new(&cfg.file.state.state_file))?;
 
+    // Build the on-chain monitor.
+    let sources = parse_addresses(&cfg.file.endpoints.log_sources)
+        .context("parsing log_sources addresses")?;
+    let targets = parse_addresses(
+        &cfg.file
+            .targets
+            .iter()
+            .map(|t| t.address.clone())
+            .collect::<Vec<_>>(),
+    )
+    .context("parsing target addresses")?;
+
     info!(
         mode = ?cfg.file.mode,
         executor = executor.label(),
-        targets = cfg.file.targets.len(),
+        targets = targets.len(),
         copy_factor = cfg.file.copy_factor,
-        poll_secs = cfg.file.poll_interval_secs,
         "polymarket copy-trading bot starting"
     );
     if cfg.file.mode == Mode::Live {
         warn!("LIVE mode: real orders will be submitted with real funds");
     }
 
+    let monitor = ChainMonitor::new(cfg.wss_rpc().to_string(), sources, targets);
+    let mut trades = monitor.spawn();
+
     loop {
-        if let Err(e) = poll_once(&monitor, &cfg, &mut state, executor.as_ref()).await {
-            warn!(error = %e, "poll cycle failed");
-        }
-        if let Err(e) = state.save() {
-            warn!(error = %e, "failed to persist state");
-        }
-
-        if args.once {
-            break;
-        }
-
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(cfg.file.poll_interval_secs)) => {}
+            maybe_trade = trades.recv() => {
+                match maybe_trade {
+                    Some(trade) => {
+                        handle_trade(&trade, &by_addr, &cfg, &mut state, executor.as_ref()).await;
+                        if let Err(e) = state.save() {
+                            warn!(error = %e, "failed to persist state");
+                        }
+                    }
+                    None => {
+                        warn!("monitor channel closed; exiting");
+                        break;
+                    }
+                }
+            }
             _ = signal::ctrl_c() => {
                 info!("received ctrl-c, shutting down");
                 break;
@@ -124,71 +143,58 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn poll_once(
-    monitor: &Monitor,
+async fn handle_trade(
+    trade: &TargetTrade,
+    by_addr: &HashMap<String, Target>,
     cfg: &Config,
     state: &mut State,
     executor: &dyn OrderExecutor,
-) -> Result<()> {
-    let first_run = !state.bootstrapped;
-    if first_run {
-        info!("first run: recording current history without trading (bootstrap)");
+) {
+    let key = trade.dedup_key();
+    if state.has_seen(&key) {
+        return;
     }
 
-    for target in &cfg.file.targets {
-        let items = match monitor.fetch_activity(&target.address).await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(target = %target.address, error = %e, "failed to fetch activity");
-                continue;
-            }
-        };
+    let Some(target) = by_addr.get(&trade.target.to_lowercase()) else {
+        // Shouldn't happen (the filter is by target), but be defensive.
+        debug!(target = %trade.target, "fill from untracked address; ignoring");
+        return;
+    };
 
-        // The API returns newest-first; process oldest-first for chronology.
-        for item in items.iter().rev() {
-            if !item.is_trade() {
-                continue;
-            }
-            let key = item.dedup_key();
-            if state.has_seen(&key) {
-                continue;
-            }
+    info!(
+        target = %target.label.clone().unwrap_or_else(|| target.address.clone()),
+        side = trade.side.as_str(),
+        shares = trade.shares,
+        price = format!("{:.3}", trade.price),
+        usdc = format!("{:.2}", trade.usdc),
+        tx = %trade.tx_hash,
+        "target fill"
+    );
 
-            if first_run {
-                state.mark_seen(key);
-                continue;
-            }
-
-            match sizing::build_order(item, target, &cfg.file) {
-                Ok(order) => match executor.execute(&order).await {
-                    Ok(out) => info!(
-                        target = %order.target_label,
-                        side = order.side.as_str(),
-                        shares = order.size_shares,
-                        price = order.price,
-                        usdc = order.usdc,
-                        title = order.title.as_deref().unwrap_or(""),
-                        submitted = out.submitted,
-                        detail = %out.detail,
-                        "COPY"
-                    ),
-                    Err(e) => warn!(error = %e, key = %key, "order execution failed"),
-                },
-                Err(skip) => {
-                    debug!(reason = %skip, target = %target.address, "skip trade");
-                }
-            }
-
-            // Mark seen after the attempt so we never double-submit on restart.
-            state.mark_seen(key);
-        }
+    match sizing::build_order(trade, target, &cfg.file) {
+        Ok(order) => match executor.execute(&order).await {
+            Ok(out) => info!(
+                side = order.side.as_str(),
+                shares = order.size_shares,
+                price = order.price,
+                usdc = format!("{:.2}", order.usdc),
+                submitted = out.submitted,
+                detail = %out.detail,
+                "COPY"
+            ),
+            Err(e) => warn!(error = %e, key = %key, "order execution failed"),
+        },
+        Err(skip) => debug!(reason = %skip, "skip trade"),
     }
 
-    if first_run {
-        state.set_bootstrapped();
-        info!("bootstrap complete — only NEW trades will be copied from now on");
-    }
-    Ok(())
+    // Mark seen after the attempt so a restart never double-submits.
+    state.mark_seen(key);
+}
+
+fn parse_addresses(raw: &[String]) -> Result<Vec<Address>> {
+    raw.iter()
+        .map(|s| s.parse::<Address>().with_context(|| format!("invalid address {s}")))
+        .collect()
 }
 
 /// Derive CLOB API credentials from the configured private key.

@@ -26,8 +26,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 
-# CLOB live-order signing (EIP-712) + L2 HMAC auth
-alloy = { version = "1.0", features = ["sol-types", "signer-local"] }
+# CLOB live-order signing (EIP-712) + L2 HMAC auth + on-chain WS log subscription
+alloy = { version = "1.0", features = [
+    "sol-types",
+    "signer-local",
+    "provider-ws",
+    "rpc-types",
+] }
+futures-util = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"

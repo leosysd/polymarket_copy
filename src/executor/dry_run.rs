@@ -26,8 +26,6 @@ struct LedgerRow<'a> {
     usdc: f64,
     target: &'a str,
     target_label: &'a str,
-    title: Option<&'a str>,
-    outcome: Option<&'a str>,
     source_key: &'a str,
 }
 
@@ -51,8 +49,6 @@ impl DryRunExecutor {
             usdc: order.usdc,
             target: &order.target,
             target_label: &order.target_label,
-            title: order.title.as_deref(),
-            outcome: order.outcome.as_deref(),
             source_key: &order.source_key,
         };
         let line = serde_json::to_string(&row)?;

@@ -27,10 +27,24 @@ fn default_weight() -> f64 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Endpoints {
-    pub data_api: String,
     pub clob: String,
     pub chain_id: u64,
+    /// EIP-712 verifying contract for signing live orders.
     pub exchange: String,
+    /// Contract addresses that emit the fill events we subscribe to. Defaults to
+    /// the live Polymarket exchange verified on-chain.
+    #[serde(default = "default_log_sources")]
+    pub log_sources: Vec<String>,
+}
+
+fn default_log_sources() -> Vec<String> {
+    vec![
+        // Live Polymarket exchange settling BTC 5-minute (and other) markets.
+        "0xe111180000d2663c0091e4f400237545b87b996b".to_string(),
+        // Legacy CTF Exchange + NegRisk CTF Exchange (kept as fallbacks).
+        "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E".to_string(),
+        "0xC5d563A36AE78145C45a50134d48A1215220f80a".to_string(),
+    ]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,8 +56,6 @@ pub struct StatePaths {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileConfig {
     pub mode: Mode,
-    #[serde(default = "default_poll")]
-    pub poll_interval_secs: u64,
     pub copy_factor: f64,
     #[serde(default)]
     pub min_order_usdc: f64,
@@ -58,9 +70,6 @@ pub struct FileConfig {
     pub state: StatePaths,
 }
 
-fn default_poll() -> u64 {
-    8
-}
 fn default_max_usdc() -> f64 {
     50.0
 }
@@ -68,9 +77,11 @@ fn default_slippage() -> u32 {
     150
 }
 
-/// Secrets pulled from the environment. Empty unless live trading.
+/// Secrets pulled from the environment.
 #[derive(Debug, Clone, Default)]
 pub struct Secrets {
+    /// Polygon WebSocket RPC URL (required — the monitor subscribes over it).
+    pub wss_rpc: Option<String>,
     pub private_key: Option<String>,
     pub api_key: Option<String>,
     pub api_secret: Option<String>,
@@ -104,6 +115,7 @@ impl Config {
         }
 
         let secrets = Secrets {
+            wss_rpc: env_opt("PM_WSS_RPC"),
             private_key: env_opt("PM_PRIVATE_KEY"),
             api_key: env_opt("PM_API_KEY"),
             api_secret: env_opt("PM_API_SECRET"),
@@ -115,10 +127,19 @@ impl Config {
         };
 
         let cfg = Config { file, secrets };
+        if cfg.secrets.wss_rpc.is_none() {
+            return Err(anyhow!(
+                "PM_WSS_RPC is required (a Polygon wss:// endpoint, e.g. from Alchemy)"
+            ));
+        }
         if cfg.file.mode == Mode::Live {
             cfg.validate_live()?;
         }
         Ok(cfg)
+    }
+
+    pub fn wss_rpc(&self) -> &str {
+        self.secrets.wss_rpc.as_deref().unwrap_or_default()
     }
 
     fn validate_live(&self) -> Result<()> {

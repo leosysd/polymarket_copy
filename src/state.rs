@@ -1,5 +1,6 @@
-//! Persistent dedup state: which target trades we've already processed, so a
-//! restart never replays history. Stored as a small JSON file.
+//! Persistent dedup state: which fills (tx-hash:log-index) we've already acted
+//! on, so a reconnect or restart never double-submits. Stored as a small JSON
+//! file. WS subscriptions only deliver new events, so we never replay history.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -12,26 +13,21 @@ const MAX_KEYS: usize = 50_000;
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StateFile {
     seen: VecDeque<String>,
-    bootstrapped: bool,
 }
 
 pub struct State {
     path: PathBuf,
     set: HashSet<String>,
     order: VecDeque<String>,
-    pub bootstrapped: bool,
     dirty: bool,
 }
 
 impl State {
     pub fn load(path: &Path) -> Result<State> {
-        let (file, fresh) = match std::fs::read_to_string(path) {
-            Ok(text) => (
-                serde_json::from_str::<StateFile>(&text)
-                    .with_context(|| format!("parsing state file {}", path.display()))?,
-                false,
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (StateFile::default(), true),
+        let file = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str::<StateFile>(&text)
+                .with_context(|| format!("parsing state file {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => StateFile::default(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
 
@@ -40,8 +36,6 @@ impl State {
             path: path.to_path_buf(),
             set,
             order: file.seen,
-            // A brand-new state file means first run -> needs a bootstrap pass.
-            bootstrapped: if fresh { false } else { file.bootstrapped },
             dirty: false,
         })
     }
@@ -62,13 +56,6 @@ impl State {
         }
     }
 
-    pub fn set_bootstrapped(&mut self) {
-        if !self.bootstrapped {
-            self.bootstrapped = true;
-            self.dirty = true;
-        }
-    }
-
     /// Write to disk only if something changed. Atomic via temp-file + rename.
     pub fn save(&mut self) -> Result<()> {
         if !self.dirty {
@@ -81,7 +68,6 @@ impl State {
         }
         let file = StateFile {
             seen: self.order.clone(),
-            bootstrapped: self.bootstrapped,
         };
         let json = serde_json::to_string(&file)?;
         let tmp = self.path.with_extension("json.tmp");

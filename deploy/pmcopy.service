@@ -1,0 +1,27 @@
+[Unit]
+Description=Polymarket copy-trading bot (pmcopy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- set this to your VPS user; all paths below derive from its home (%h) ---
+User=ubuntu
+# Assumes the repo is cloned at ~/polymarket_copy. Adjust %h/polymarket_copy
+# everywhere if you put it elsewhere.
+WorkingDirectory=%h/polymarket_copy
+EnvironmentFile=%h/polymarket_copy/.env
+ExecStart=%h/polymarket_copy/target/release/pmcopy --config %h/polymarket_copy/config.toml
+Restart=always
+RestartSec=5
+# Give the WS reconnect logic room; don't flap-restart forever instantly.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

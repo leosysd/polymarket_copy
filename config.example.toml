@@ -1,14 +1,11 @@
 # ===========================================================================
 # Polymarket copy-trading bot configuration
-# Copy to `config.toml` and edit. Secrets live in `.env`, not here.
+# Copy to `config.toml` and edit. Secrets (incl. the WSS RPC URL) live in `.env`.
 # ===========================================================================
 
 # "dry_run" = monitor + log copy decisions, place NO real orders (default, safe).
 # "live"    = sign and submit real orders via the CLOB. Requires .env credentials.
 mode = "dry_run"
-
-# Seconds between polls of each target's trade activity.
-poll_interval_secs = 8
 
 # ---------------------------------------------------------------------------
 # Position sizing — proportional to the target's trade size.
@@ -25,8 +22,9 @@ only_buys = false         # true = only mirror entries (BUY), ignore the target'
 max_slippage_bps = 150
 
 # ---------------------------------------------------------------------------
-# Targets to follow. `address` is the trader's Polymarket wallet (proxy) address.
-# `weight` is an optional per-target multiplier on top of copy_factor (default 1.0).
+# Targets to follow. `address` is the trader's Polymarket wallet (the order
+# maker / proxy address that appears in on-chain OrderFilled events).
+# `weight` is an optional per-target multiplier on top of copy_factor.
 # ---------------------------------------------------------------------------
 [[targets]]
 address = "0x0000000000000000000000000000000000000000"
@@ -36,20 +34,25 @@ label = "example-trader"
 # [[targets]]
 # address = "0x..."
 # weight = 0.5
-# label = "conservative-whale"
+# label = "second-trader"
 
 # ---------------------------------------------------------------------------
-# Endpoints (override only if Polymarket changes them).
+# Endpoints / contracts (override only if Polymarket changes them).
+# The WebSocket RPC URL itself is set via PM_WSS_RPC in .env.
 # ---------------------------------------------------------------------------
 [endpoints]
-data_api = "https://data-api.polymarket.com"
 clob = "https://clob.polymarket.com"
 chain_id = 137
-# Polymarket CTF Exchange (the EIP-712 verifying contract on Polygon mainnet).
+# EIP-712 verifying contract for signing live orders (CTF Exchange).
 exchange = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+# Contracts whose fill events we subscribe to. Has a sensible default (the live
+# Polymarket exchange verified on-chain); uncomment to override.
+# log_sources = [
+#   "0xe111180000d2663c0091e4f400237545b87b996b",
+#   "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+#   "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+# ]
 
 [state]
-# Where the bot remembers which trades it has already seen (dedup) and the
-# dry-run ledger of copy decisions.
 state_file = "data/state.json"
 ledger_file = "data/copies.jsonl"
