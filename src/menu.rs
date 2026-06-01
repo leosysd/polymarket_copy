@@ -529,13 +529,19 @@ fn update_self(theme: &ColorfulTheme) -> Result<()> {
         return Ok(());
     }
     if Path::new("/usr/local/bin/pmcopy").exists() {
+        // Replace via temp-file + rename so it works even while this menu (or the
+        // service) is running the old binary ("Text file busy" otherwise).
         run_cmd(
             "sudo",
-            &["install", "-m0755", "target/release/pmcopy", "/usr/local/bin/pmcopy"],
+            &["cp", "target/release/pmcopy", "/usr/local/bin/pmcopy.new"],
+        );
+        run_cmd(
+            "sudo",
+            &["mv", "-f", "/usr/local/bin/pmcopy.new", "/usr/local/bin/pmcopy"],
         );
     }
     println!(
-        "  {} 更新完成。重新运行 poly 用上新版本。",
+        "  {} 更新完成。重启服务即用上新版本。",
         style("✔").green()
     );
     offer_restart(theme)?;
