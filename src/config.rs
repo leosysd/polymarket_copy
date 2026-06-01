@@ -31,6 +31,9 @@ pub struct Endpoints {
     pub chain_id: u64,
     /// EIP-712 verifying contract for signing live orders.
     pub exchange: String,
+    /// Gamma API base, used to resolve a token id to its market slug.
+    #[serde(default = "default_gamma")]
+    pub gamma: String,
     /// Contract addresses that emit the fill events we subscribe to. Defaults to
     /// the live Polymarket exchange verified on-chain.
     #[serde(default = "default_log_sources")]
@@ -72,6 +75,10 @@ pub struct FileConfig {
     /// "GTC" (leftover rests on the book).
     #[serde(default = "default_order_type")]
     pub order_type: String,
+    /// Only copy fills whose market slug contains this (case-insensitive).
+    /// Default limits copying to BTC 5-minute markets. Empty = all markets.
+    #[serde(default = "default_market_filter")]
+    pub market_filter: String,
     pub targets: Vec<Target>,
     pub endpoints: Endpoints,
     pub state: StatePaths,
@@ -85,6 +92,12 @@ fn default_slippage() -> f64 {
 }
 fn default_order_type() -> String {
     "FAK".to_string()
+}
+fn default_market_filter() -> String {
+    "btc-updown-5m".to_string()
+}
+fn default_gamma() -> String {
+    "https://gamma-api.polymarket.com".to_string()
 }
 
 /// Secrets pulled from the environment.
