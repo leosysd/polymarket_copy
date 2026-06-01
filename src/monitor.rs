@@ -1,15 +1,18 @@
-//! Low-latency monitor: polls Polygon for the target wallets' order-fill logs
-//! via `eth_getLogs`, block by block, and decodes them in near real-time.
+//! Low-latency monitor for target wallets' Polymarket fills.
 //!
-//! We poll `eth_getLogs` rather than `eth_subscribe` because subscription
-//! delivery proved unreliable on real nodes (it silently dropped matching logs);
-//! `eth_getLogs` is the node's authoritative state with no cache, so it never
-//! misses a fill. Latency is still ~block time (a few seconds), not the 1–3 min
-//! of the Data-API.
+//! Primary path: **`eth_subscribe` logs** over a WebSocket — the moment a
+//! matching `OrderFilled` is pushed, it triggers a copy (lowest latency).
 //!
-//! The Polymarket exchange that settles these markets
-//! (`0xe1111800…`) emits a fill event whose topic0 is the hardcoded
-//! `ORDER_FILLED_TOPIC` below and whose data layout is:
+//! Safety net: **`eth_getLogs`** backfill, because subscription delivery can
+//! silently drop logs on some nodes. We getLogs:
+//!   - on startup (recent N blocks),
+//!   - on every reconnect (last_seen_block → latest, closing the gap),
+//!   - periodically (calibration sweep).
+//! Both paths feed the same channel; the consumer dedups by (tx, log_index),
+//! so a fill is copied once — as soon as either path sees it.
+//!
+//! The Polymarket exchange that settles these markets (`0xe1111800…`) emits a
+//! fill event with topic0 `ORDER_FILLED_TOPIC` and data layout:
 //!   topics: [sig, orderHash, maker, taker]
 //!   data:   [makerAssetId, takerAssetId, makerAmountFilled, takerAmountFilled, fee]
 //! Collateral (USDC) is asset id 0; the other side is the CTF token id.
@@ -19,6 +22,7 @@ use alloy::primitives::{b256, Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::rpc::types::{Filter, Log};
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -28,11 +32,14 @@ use tracing::{info, warn};
 const ORDER_FILLED_TOPIC: B256 =
     b256!("d543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee");
 
-/// How long to wait before reconnecting after the RPC connection drops.
+/// How long to wait before reconnecting after the connection drops.
 const RECONNECT_DELAY: Duration = Duration::from_millis(100);
-
-/// How often to poll for new blocks' logs. Polygon blocks are ~2s.
-const POLL_INTERVAL: Duration = Duration::from_millis(1000);
+/// Periodic getLogs calibration sweep (safety net for dropped subscription logs).
+const CALIBRATE_INTERVAL: Duration = Duration::from_secs(5);
+/// On first startup, backfill this many recent blocks (covers the tiny gap
+/// before the subscription becomes active). The window-alignment gate prevents
+/// copying anything stale anyway.
+const STARTUP_LOOKBACK_BLOCKS: u64 = 3;
 
 pub struct ChainMonitor {
     wss_url: String,
@@ -49,16 +56,17 @@ impl ChainMonitor {
         }
     }
 
-    /// Spawn the subscription loop on a background task. Decoded trades arrive on
-    /// the returned channel; the loop reconnects automatically on disconnect.
+    /// Spawn the monitor on a background task. Decoded trades arrive on the
+    /// returned channel; the loop reconnects automatically and keeps the last
+    /// processed block so reconnect gaps get backfilled.
     pub fn spawn(self) -> mpsc::Receiver<TargetTrade> {
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
+            let mut last_block: Option<u64> = None;
             loop {
-                if let Err(e) = self.run_once(&tx).await {
-                    warn!(error = %e, "log subscription dropped; reconnecting");
-                } else {
-                    warn!("log subscription ended; reconnecting");
+                match self.run_once(&tx, &mut last_block).await {
+                    Err(e) => warn!(error = %e, "monitor connection error; reconnecting"),
+                    Ok(()) => warn!("monitor stream ended; reconnecting"),
                 }
                 if tx.is_closed() {
                     return;
@@ -69,53 +77,100 @@ impl ChainMonitor {
         rx
     }
 
-    async fn run_once(&self, tx: &mpsc::Sender<TargetTrade>) -> Result<()> {
+    fn filter(&self) -> Filter {
+        let maker_topics: Vec<B256> = self.targets.iter().map(|a| a.into_word()).collect();
+        Filter::new()
+            .address(self.sources.clone())
+            .event_signature(ORDER_FILLED_TOPIC)
+            .topic2(maker_topics)
+    }
+
+    /// getLogs over [from, to] and forward decoded trades. Deduped downstream.
+    /// Returns false if the channel closed.
+    async fn backfill<P: Provider>(
+        &self,
+        provider: &P,
+        from: u64,
+        to: u64,
+        tx: &mpsc::Sender<TargetTrade>,
+    ) -> Result<bool> {
+        if from > to {
+            return Ok(true);
+        }
+        let filter = self.filter().from_block(from).to_block(to);
+        let logs = provider.get_logs(&filter).await.context("get_logs backfill")?;
+        for log in &logs {
+            if let Some(trade) = decode(log) {
+                if tx.send(trade).await.is_err() {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    async fn run_once(
+        &self,
+        tx: &mpsc::Sender<TargetTrade>,
+        last_block: &mut Option<u64>,
+    ) -> Result<()> {
         let provider = ProviderBuilder::new()
             .connect_ws(WsConnect::new(self.wss_url.clone()))
             .await
-            .context("connecting to Polygon RPC")?;
+            .context("connecting to Polygon WebSocket RPC")?;
 
-        let maker_topics: Vec<B256> = self.targets.iter().map(|a| a.into_word()).collect();
-
-        // Start from the current head; we only act on fills from now on (no replay).
-        let mut last = provider
-            .get_block_number()
-            .await
-            .context("get_block_number")?;
+        // (Re)connect backfill: from last seen block (reconnect gap) or a small
+        // startup lookback. Closes any window where the subscription was down.
+        let head = provider.get_block_number().await.context("get_block_number")?;
+        let from = match *last_block {
+            Some(b) => b + 1,
+            None => head.saturating_sub(STARTUP_LOOKBACK_BLOCKS),
+        };
         info!(
             targets = self.targets.len(),
             sources = self.sources.len(),
-            from_block = last,
-            "polling on-chain fills (eth_getLogs)"
+            from_block = from,
+            head,
+            "monitor: eth_subscribe (primary) + eth_getLogs (backfill)"
         );
+        if !self.backfill(&provider, from, head, tx).await? {
+            return Ok(());
+        }
+        *last_block = Some(head);
+
+        // Primary low-latency path: subscription push.
+        let sub = provider
+            .subscribe_logs(&self.filter())
+            .await
+            .context("subscribing to order-fill logs")?;
+        let mut stream = sub.into_stream();
+        let mut ticker = tokio::time::interval(CALIBRATE_INTERVAL);
+        ticker.tick().await; // drop the immediate first tick
 
         loop {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            let latest = provider
-                .get_block_number()
-                .await
-                .context("get_block_number")?;
-            if latest <= last {
-                continue;
-            }
-
-            // Fill events on the exchange(s) where maker (topic2) is a target.
-            let filter = Filter::new()
-                .address(self.sources.clone())
-                .event_signature(ORDER_FILLED_TOPIC)
-                .topic2(maker_topics.clone())
-                .from_block(last + 1)
-                .to_block(latest);
-
-            let logs = provider.get_logs(&filter).await.context("get_logs")?;
-            for log in &logs {
-                if let Some(trade) = decode(log) {
-                    if tx.send(trade).await.is_err() {
-                        return Ok(());
+            tokio::select! {
+                maybe_log = stream.next() => {
+                    match maybe_log {
+                        Some(log) => {
+                            if let Some(trade) = decode(&log) {
+                                if tx.send(trade).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        None => return Ok(()), // stream ended -> reconnect (+ gap backfill)
                     }
                 }
+                _ = ticker.tick() => {
+                    // Calibration sweep: backfill anything the subscription missed.
+                    let head = provider.get_block_number().await.context("get_block_number")?;
+                    let from = last_block.map(|b| b + 1).unwrap_or(head);
+                    if !self.backfill(&provider, from, head, tx).await? {
+                        return Ok(());
+                    }
+                    *last_block = Some(head);
+                }
             }
-            last = latest;
         }
     }
 }
