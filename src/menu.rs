@@ -330,15 +330,15 @@ fn targets_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                     println!("  地址无效，已跳过。");
                     continue;
                 }
-                let weight = prompt_f64(theme, "权重 (1.0 = 完整 copy_factor)").unwrap_or(1.0);
                 let label: String = Input::with_theme(theme)
                     .with_prompt("标签（备注名）")
                     .default(address.clone())
                     .interact_text()?;
 
+                // weight 固定 1.0（跟单比例统一用 copy_factor 调，避免误填）。
                 let mut t = Table::new();
                 t["address"] = value(address);
-                t["weight"] = value(weight);
+                t["weight"] = value(1.0);
                 t["label"] = value(label);
                 ensure_targets(&mut doc).push(t);
                 save_doc(config_path, &doc)?;
