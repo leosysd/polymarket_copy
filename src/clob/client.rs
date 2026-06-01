@@ -46,11 +46,12 @@ impl ClobClient {
             req = req.header(k, v);
         }
 
+        let order_json = serde_json::to_string(payload).unwrap_or_default();
         let resp = req.send().await.context("posting order to CLOB")?;
         let status = resp.status();
         let text = resp.text().await.context("reading CLOB response")?;
         if !status.is_success() {
-            bail!("CLOB /order returned {status}: {text}");
+            bail!("CLOB /order returned {status}: {text}  ||  sent order: {order_json}");
         }
         Ok(text)
     }
