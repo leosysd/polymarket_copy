@@ -27,7 +27,7 @@ const ORDER_FILLED_TOPIC: B256 =
     b256!("d543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee");
 
 /// How long to wait before re-subscribing after a dropped connection.
-const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const RECONNECT_DELAY: Duration = Duration::from_millis(100);
 
 pub struct ChainMonitor {
     wss_url: String,

@@ -122,6 +122,17 @@ async fn main() -> Result<()> {
         warn!("LIVE mode: real orders will be submitted with real funds");
     }
 
+    // Window alignment: if we start mid-window, don't trade the current
+    // 5-minute window — wait until the next boundary (epoch multiple of 300s).
+    let now = chrono::Utc::now().timestamp();
+    let trade_enabled_at = ((now + 299) / 300) * 300;
+    if trade_enabled_at > now {
+        info!(
+            wait_s = trade_enabled_at - now,
+            "启动于 5 分钟窗口中途：对齐到下个窗口边界后才开始下单"
+        );
+    }
+
     let monitor = ChainMonitor::new(cfg.wss_rpc().to_string(), sources, targets);
     let mut trades = monitor.spawn();
 
@@ -130,7 +141,7 @@ async fn main() -> Result<()> {
             maybe_trade = trades.recv() => {
                 match maybe_trade {
                     Some(trade) => {
-                        handle_trade(&trade, &by_addr, &cfg, &mut state, executor.as_ref()).await;
+                        handle_trade(&trade, &by_addr, &cfg, &mut state, executor.as_ref(), trade_enabled_at).await;
                         if let Err(e) = state.save() {
                             warn!(error = %e, "failed to persist state");
                         }
@@ -158,6 +169,7 @@ async fn handle_trade(
     cfg: &Config,
     state: &mut State,
     executor: &dyn OrderExecutor,
+    trade_enabled_at: i64,
 ) {
     let key = trade.dedup_key();
     if state.has_seen(&key) {
@@ -179,6 +191,14 @@ async fn handle_trade(
         tx = %trade.tx_hash,
         "target fill"
     );
+
+    // Window-alignment gate (applies to dry_run and live alike).
+    let now = chrono::Utc::now().timestamp();
+    if now < trade_enabled_at {
+        info!(wait_s = trade_enabled_at - now, "窗口对齐中，本笔不下单");
+        state.mark_seen(key);
+        return;
+    }
 
     match sizing::build_order(trade, target, &cfg.file) {
         Ok(order) => match executor.execute(&order).await {
