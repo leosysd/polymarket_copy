@@ -66,6 +66,11 @@ pub struct FileConfig {
     pub max_order_usdc: f64,
     #[serde(default)]
     pub only_buys: bool,
+    /// If true, on startup wait until the next 5-minute boundary before trading
+    /// (skip the in-progress window). Default false = trade immediately, so a
+    /// restart takes effect at once instead of losing a window.
+    #[serde(default)]
+    pub align_to_window: bool,
     /// Absolute price offset to cross the book, in price units (e.g. 0.02 means
     /// a BUY at target 0.50 is limited at 0.52, a SELL at 0.48).
     #[serde(default = "default_slippage")]

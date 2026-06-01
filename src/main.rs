@@ -112,15 +112,22 @@ async fn main() -> Result<()> {
         warn!("LIVE mode: real orders will be submitted with real funds");
     }
 
-    // Window alignment: if we start mid-window, don't trade the current
-    // 5-minute window — wait until the next boundary (epoch multiple of 300s).
+    // Window alignment (opt-in): if enabled and we start mid-window, wait until
+    // the next 5-minute boundary before trading. Default off so a restart takes
+    // effect immediately instead of losing a window.
     let now = chrono::Utc::now().timestamp();
-    let trade_enabled_at = ((now + 299) / 300) * 300;
+    let trade_enabled_at = if cfg.file.align_to_window {
+        ((now + 299) / 300) * 300
+    } else {
+        0
+    };
     if trade_enabled_at > now {
         info!(
             wait_s = trade_enabled_at - now,
             "启动于 5 分钟窗口中途：对齐到下个窗口边界后才开始下单"
         );
+    } else {
+        info!("立即开始跟单（未启用窗口对齐）");
     }
 
     let monitor = ChainMonitor::new(cfg.wss_rpc().to_string(), sources, targets);
