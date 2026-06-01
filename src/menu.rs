@@ -1,8 +1,7 @@
-//! Built-in interactive management menu (`pmcopy menu`).
+//! 内置交互式管理菜单（`pmcopy menu`）。
 //!
-//! Edits `config.toml` (preserving comments via toml_edit) and `.env`, controls
-//! the systemd service, shows status / the copy ledger, derives API keys, and
-//! can launch the bot in the foreground.
+//! 编辑 config.toml（用 toml_edit 保留注释）和 .env，控制 systemd 服务，
+//! 查看状态/跟单账本，派生 API key，也能前台启动机器人。
 
 use crate::clob::{create_or_derive_api_creds, OrderSigner};
 use anyhow::{anyhow, Context, Result};
@@ -24,17 +23,17 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
         println!("\n{}", summary_line(&doc));
 
         let items = [
-            "Status",
-            "Settings (mode, sizing, slippage, order type)",
-            "Targets (add / remove wallets)",
-            "Service (systemd start/stop/restart)",
-            "Ledger (recent copies)",
-            "Derive & save API key",
-            "Run now (foreground)",
-            "Quit",
+            "状态",
+            "设置（模式 / 份数 / 滑点 / 订单类型）",
+            "目标钱包（添加 / 删除）",
+            "服务（systemd 启动 / 停止 / 重启）",
+            "账本（最近跟单）",
+            "派生并保存 API key",
+            "立即运行（前台）",
+            "退出",
         ];
         let choice = Select::with_theme(&theme)
-            .with_prompt("Manage")
+            .with_prompt("管理")
             .items(&items)
             .default(0)
             .interact()?;
@@ -54,7 +53,7 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Status / summary
+// 状态 / 概览
 // ---------------------------------------------------------------------------
 
 fn summary_line(doc: &DocumentMut) -> String {
@@ -65,25 +64,25 @@ fn summary_line(doc: &DocumentMut) -> String {
         .and_then(|t| t.as_array_of_tables())
         .map(|a| a.len())
         .unwrap_or(0);
-    format!("── pmcopy ── mode={mode}  targets={n}  copy_factor={factor} ──")
+    format!("── pmcopy ── 模式={mode}  目标={n}  copy_factor={factor} ──")
 }
 
 fn status(config_path: &Path) -> Result<()> {
     let doc = load_doc(config_path)?;
     println!();
-    for (k, path) in [
-        ("mode", vec!["mode"]),
-        ("copy_factor", vec!["copy_factor"]),
-        ("max_slippage", vec!["max_slippage"]),
-        ("order_type", vec!["order_type"]),
-        ("min_order_usdc", vec!["min_order_usdc"]),
-        ("max_order_usdc", vec!["max_order_usdc"]),
-        ("only_buys", vec!["only_buys"]),
+    for k in [
+        "mode",
+        "copy_factor",
+        "max_slippage",
+        "order_type",
+        "min_order_usdc",
+        "max_order_usdc",
+        "only_buys",
     ] {
         let v = doc
-            .get(path[0])
+            .get(k)
             .map(|i| i.to_string().trim().to_string())
-            .unwrap_or_else(|| "(default)".into());
+            .unwrap_or_else(|| "(默认)".into());
         println!("  {k:16}= {v}");
     }
     let n = doc
@@ -91,42 +90,42 @@ fn status(config_path: &Path) -> Result<()> {
         .and_then(|t| t.as_array_of_tables())
         .map(|a| a.len())
         .unwrap_or(0);
-    println!("  {:16}= {n}", "targets");
+    println!("  {:16}= {n}", "目标数");
     println!("  {:16}= {}", "PM_WSS_RPC", env_set("PM_WSS_RPC"));
     println!("  {:16}= {}", "PM_PRIVATE_KEY", env_set("PM_PRIVATE_KEY"));
 
     let ledger = ledger_path(&doc);
     let lines = std::fs::read_to_string(&ledger).map(|s| s.lines().count()).unwrap_or(0);
-    println!("  {:16}= {lines} rows ({})", "copies ledger", ledger.display());
+    println!("  {:16}= {lines} 行 ({})", "账本", ledger.display());
     Ok(())
 }
 
 fn env_set(key: &str) -> &'static str {
     match std::env::var(key) {
-        Ok(v) if !v.trim().is_empty() => "set",
-        _ => "NOT set",
+        Ok(v) if !v.trim().is_empty() => "已设置",
+        _ => "未设置",
     }
 }
 
 // ---------------------------------------------------------------------------
-// Settings
+// 设置
 // ---------------------------------------------------------------------------
 
 fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
     let items = [
-        "mode (dry_run / live)",
-        "copy_factor",
-        "max_slippage",
-        "order_type",
-        "min_order_usdc",
-        "max_order_usdc",
-        "only_buys",
-        "Back",
+        "mode 模式 (dry_run / live)",
+        "copy_factor 份数倍率",
+        "max_slippage 滑点(绝对偏移)",
+        "order_type 订单类型",
+        "min_order_usdc 单笔最小金额",
+        "max_order_usdc 单笔最大金额",
+        "only_buys 只跟买入",
+        "返回",
     ];
     loop {
         let mut doc = load_doc(config_path)?;
         let choice = Select::with_theme(theme)
-            .with_prompt("Setting to change")
+            .with_prompt("要修改哪一项")
             .items(&items)
             .default(0)
             .interact()?;
@@ -134,45 +133,45 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
             0 => {
                 let modes = ["dry_run", "live"];
                 let i = Select::with_theme(theme)
-                    .with_prompt("mode")
+                    .with_prompt("模式")
                     .items(&modes)
                     .default(0)
                     .interact()?;
                 doc["mode"] = value(modes[i]);
             }
-            1 => doc["copy_factor"] = value(prompt_f64(theme, "copy_factor (e.g. 0.25)")?),
-            2 => doc["max_slippage"] = value(prompt_f64(theme, "max_slippage (e.g. 0.02)")?),
+            1 => doc["copy_factor"] = value(prompt_f64(theme, "copy_factor 份数倍率（如 0.25 = 跟 25%）")?),
+            2 => doc["max_slippage"] = value(prompt_f64(theme, "max_slippage 价格偏移（如 0.02 → 0.50 挂 0.52）")?),
             3 => {
                 let types = ["FAK", "FOK", "GTC", "GTD"];
                 let i = Select::with_theme(theme)
-                    .with_prompt("order_type")
+                    .with_prompt("订单类型")
                     .items(&types)
                     .default(0)
                     .interact()?;
                 doc["order_type"] = value(types[i]);
             }
-            4 => doc["min_order_usdc"] = value(prompt_f64(theme, "min_order_usdc")?),
-            5 => doc["max_order_usdc"] = value(prompt_f64(theme, "max_order_usdc")?),
+            4 => doc["min_order_usdc"] = value(prompt_f64(theme, "min_order_usdc 单笔最小 USDC")?),
+            5 => doc["max_order_usdc"] = value(prompt_f64(theme, "max_order_usdc 单笔最大 USDC")?),
             6 => {
                 let on = Confirm::with_theme(theme)
-                    .with_prompt("only_buys (mirror entries only)?")
+                    .with_prompt("only_buys（只跟买入/进场，忽略卖出）？")
                     .interact()?;
                 doc["only_buys"] = value(on);
             }
             _ => return Ok(()),
         }
         save_doc(config_path, &doc)?;
-        println!("  saved. (restart the service for changes to take effect)");
+        println!("  已保存。（需重启服务才生效）");
     }
 }
 
 fn prompt_f64(theme: &ColorfulTheme, prompt: &str) -> Result<f64> {
     let s: String = Input::with_theme(theme).with_prompt(prompt).interact_text()?;
-    s.trim().parse().context("not a number")
+    s.trim().parse().context("不是有效数字")
 }
 
 // ---------------------------------------------------------------------------
-// Targets
+// 目标钱包
 // ---------------------------------------------------------------------------
 
 fn targets_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
@@ -180,34 +179,34 @@ fn targets_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
         let mut doc = load_doc(config_path)?;
         let labels = target_labels(&doc);
 
-        println!("\n  Current targets:");
+        println!("\n  当前目标：");
         if labels.is_empty() {
-            println!("    (none)");
+            println!("    （无）");
         } else {
             for (i, l) in labels.iter().enumerate() {
                 println!("    {}. {l}", i + 1);
             }
         }
 
-        let actions = ["Add target", "Remove target", "Back"];
+        let actions = ["添加目标", "删除目标", "返回"];
         let choice = Select::with_theme(theme)
-            .with_prompt("Targets")
+            .with_prompt("目标钱包")
             .items(&actions)
             .default(0)
             .interact()?;
         match choice {
             0 => {
                 let address: String = Input::with_theme(theme)
-                    .with_prompt("wallet address (0x...)")
+                    .with_prompt("钱包地址 (0x...)")
                     .interact_text()?;
                 let address = address.trim().to_string();
                 if !(address.len() == 42 && address.starts_with("0x")) {
-                    println!("  invalid address; skipped.");
+                    println!("  地址无效，已跳过。");
                     continue;
                 }
-                let weight = prompt_f64(theme, "weight (1.0 = full copy_factor)").unwrap_or(1.0);
+                let weight = prompt_f64(theme, "权重 (1.0 = 完整 copy_factor)").unwrap_or(1.0);
                 let label: String = Input::with_theme(theme)
-                    .with_prompt("label")
+                    .with_prompt("标签（备注名）")
                     .default(address.clone())
                     .interact_text()?;
 
@@ -217,23 +216,23 @@ fn targets_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                 t["label"] = value(label);
                 ensure_targets(&mut doc).push(t);
                 save_doc(config_path, &doc)?;
-                println!("  added.");
+                println!("  已添加。");
             }
             1 => {
                 if labels.is_empty() {
                     continue;
                 }
                 let mut opts = labels.clone();
-                opts.push("Cancel".into());
+                opts.push("取消".into());
                 let i = Select::with_theme(theme)
-                    .with_prompt("Remove which?")
+                    .with_prompt("删除哪个？")
                     .items(&opts)
                     .default(opts.len() - 1)
                     .interact()?;
                 if i < labels.len() {
                     ensure_targets(&mut doc).remove(i);
                     save_doc(config_path, &doc)?;
-                    println!("  removed.");
+                    println!("  已删除。");
                 }
             }
             _ => return Ok(()),
@@ -266,13 +265,13 @@ fn ensure_targets(doc: &mut DocumentMut) -> &mut toml_edit::ArrayOfTables {
 }
 
 // ---------------------------------------------------------------------------
-// Service control
+// 服务控制
 // ---------------------------------------------------------------------------
 
 fn service_menu(theme: &ColorfulTheme) -> Result<()> {
-    let actions = ["status", "start", "stop", "restart", "logs (follow)", "Back"];
+    let actions = ["状态", "启动", "停止", "重启", "日志（跟随）", "返回"];
     let choice = Select::with_theme(theme)
-        .with_prompt(format!("systemd service '{SERVICE}'"))
+        .with_prompt(format!("systemd 服务 '{SERVICE}'"))
         .items(&actions)
         .default(0)
         .interact()?;
@@ -290,12 +289,12 @@ fn service_menu(theme: &ColorfulTheme) -> Result<()> {
 fn run_cmd(bin: &str, args: &[&str]) {
     match Command::new(bin).args(args).status() {
         Ok(_) => {}
-        Err(e) => println!("  failed to run {bin}: {e}"),
+        Err(e) => println!("  运行 {bin} 失败：{e}"),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Ledger
+// 账本
 // ---------------------------------------------------------------------------
 
 fn show_ledger(config_path: &Path) -> Result<()> {
@@ -304,12 +303,12 @@ fn show_ledger(config_path: &Path) -> Result<()> {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => {
-            println!("  no ledger yet at {}", path.display());
+            println!("  暂无账本：{}", path.display());
             return Ok(());
         }
     };
     let lines: Vec<&str> = content.lines().collect();
-    println!("\n  last {} copies ({}):", 15.min(lines.len()), path.display());
+    println!("\n  最近 {} 笔跟单（{}）：", 15.min(lines.len()), path.display());
     for line in lines.iter().rev().take(15).rev() {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
             println!(
@@ -327,14 +326,14 @@ fn show_ledger(config_path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Derive API key -> .env
+// 派生 API key -> .env
 // ---------------------------------------------------------------------------
 
 async fn derive_key(config_path: &Path, http: &Client) -> Result<()> {
     let pk = std::env::var("PM_PRIVATE_KEY")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| anyhow!("set PM_PRIVATE_KEY in .env first"))?;
+        .ok_or_else(|| anyhow!("请先在 .env 设置 PM_PRIVATE_KEY"))?;
 
     let doc = load_doc(config_path)?;
     let chain_id = doc
@@ -348,13 +347,13 @@ async fn derive_key(config_path: &Path, http: &Client) -> Result<()> {
         .unwrap_or_else(|| "https://clob.polymarket.com".into());
 
     let signer = OrderSigner::new(&pk, chain_id, &exchange)?;
-    println!("  deriving from {} ...", signer.address().to_checksum(None));
+    println!("  正在用 {} 派生 ...", signer.address().to_checksum(None));
     let creds = create_or_derive_api_creds(http, &clob, &signer, 0).await?;
 
     set_env_var("PM_API_KEY", &creds.api_key)?;
     set_env_var("PM_API_SECRET", &creds.secret)?;
     set_env_var("PM_API_PASSPHRASE", &creds.passphrase)?;
-    println!("  API credentials derived and written to {ENV_PATH}");
+    println!("  API 凭证已派生并写入 {ENV_PATH}");
     Ok(())
 }
 
@@ -373,17 +372,17 @@ fn set_env_var(key: &str, val: &str) -> Result<()> {
     if !replaced {
         out.push(format!("{key}={val}"));
     }
-    std::fs::write(ENV_PATH, out.join("\n") + "\n").context("writing .env")?;
+    std::fs::write(ENV_PATH, out.join("\n") + "\n").context("写入 .env")?;
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Run foreground
+// 前台运行
 // ---------------------------------------------------------------------------
 
 fn run_foreground(config_path: &Path) -> Result<()> {
-    let exe = std::env::current_exe().context("locating pmcopy binary")?;
-    println!("  starting bot (Ctrl-C to stop and return to the menu)...\n");
+    let exe = std::env::current_exe().context("定位 pmcopy 程序")?;
+    println!("  启动机器人（Ctrl-C 停止并返回菜单）...\n");
     let _ = Command::new(exe)
         .arg("--config")
         .arg(config_path)
@@ -392,7 +391,7 @@ fn run_foreground(config_path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Config doc helpers
+// 配置文件辅助
 // ---------------------------------------------------------------------------
 
 fn ensure_config(path: &Path) -> Result<()> {
@@ -402,23 +401,23 @@ fn ensure_config(path: &Path) -> Result<()> {
     let example = Path::new("config.example.toml");
     if example.exists() {
         std::fs::copy(example, path)
-            .with_context(|| format!("copying example config to {}", path.display()))?;
-        println!("created {} from config.example.toml", path.display());
+            .with_context(|| format!("从 example 复制到 {}", path.display()))?;
+        println!("已从 config.example.toml 创建 {}", path.display());
         Ok(())
     } else {
-        Err(anyhow!("{} not found and no config.example.toml", path.display()))
+        Err(anyhow!("找不到 {}，也没有 config.example.toml", path.display()))
     }
 }
 
 fn load_doc(path: &Path) -> Result<DocumentMut> {
     std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?
+        .with_context(|| format!("读取 {}", path.display()))?
         .parse::<DocumentMut>()
-        .with_context(|| format!("parsing {}", path.display()))
+        .with_context(|| format!("解析 {}", path.display()))
 }
 
 fn save_doc(path: &Path, doc: &DocumentMut) -> Result<()> {
-    std::fs::write(path, doc.to_string()).with_context(|| format!("writing {}", path.display()))
+    std::fs::write(path, doc.to_string()).with_context(|| format!("写入 {}", path.display()))
 }
 
 fn str_at(doc: &DocumentMut, path: &[&str]) -> Option<String> {
