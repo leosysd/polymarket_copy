@@ -1,8 +1,11 @@
-//! Low-latency monitor: subscribes to Polygon order-fill logs over a WebSocket
-//! RPC and decodes each target wallet's fills in near real-time.
+//! Low-latency monitor: polls Polygon for the target wallets' order-fill logs
+//! via `eth_getLogs`, block by block, and decodes them in near real-time.
 //!
-//! This replaces Data-API polling, which was measured to lag 1–3 minutes — far
-//! too slow for 5-minute BTC markets. On-chain logs arrive at ~block time.
+//! We poll `eth_getLogs` rather than `eth_subscribe` because subscription
+//! delivery proved unreliable on real nodes (it silently dropped matching logs);
+//! `eth_getLogs` is the node's authoritative state with no cache, so it never
+//! misses a fill. Latency is still ~block time (a few seconds), not the 1–3 min
+//! of the Data-API.
 //!
 //! The Polymarket exchange that settles these markets
 //! (`0xe1111800…`) emits a fill event whose topic0 is the hardcoded
@@ -16,7 +19,6 @@ use alloy::primitives::{b256, Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::rpc::types::{Filter, Log};
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -26,8 +28,11 @@ use tracing::{info, warn};
 const ORDER_FILLED_TOPIC: B256 =
     b256!("d543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee");
 
-/// How long to wait before re-subscribing after a dropped connection.
+/// How long to wait before reconnecting after the RPC connection drops.
 const RECONNECT_DELAY: Duration = Duration::from_millis(100);
+
+/// How often to poll for new blocks' logs. Polygon blocks are ~2s.
+const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 pub struct ChainMonitor {
     wss_url: String,
@@ -68,34 +73,50 @@ impl ChainMonitor {
         let provider = ProviderBuilder::new()
             .connect_ws(WsConnect::new(self.wss_url.clone()))
             .await
-            .context("connecting to Polygon WebSocket RPC")?;
+            .context("connecting to Polygon RPC")?;
 
-        // Fill events on the exchange(s) where maker (topic2) is one of our targets.
         let maker_topics: Vec<B256> = self.targets.iter().map(|a| a.into_word()).collect();
-        let filter = Filter::new()
-            .address(self.sources.clone())
-            .event_signature(ORDER_FILLED_TOPIC)
-            .topic2(maker_topics);
 
-        let sub = provider
-            .subscribe_logs(&filter)
+        // Start from the current head; we only act on fills from now on (no replay).
+        let mut last = provider
+            .get_block_number()
             .await
-            .context("subscribing to order-fill logs")?;
+            .context("get_block_number")?;
         info!(
             targets = self.targets.len(),
             sources = self.sources.len(),
-            "subscribed to on-chain fills"
+            from_block = last,
+            "polling on-chain fills (eth_getLogs)"
         );
 
-        let mut stream = sub.into_stream();
-        while let Some(log) = stream.next().await {
-            if let Some(trade) = decode(&log) {
-                if tx.send(trade).await.is_err() {
-                    return Ok(());
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let latest = provider
+                .get_block_number()
+                .await
+                .context("get_block_number")?;
+            if latest <= last {
+                continue;
+            }
+
+            // Fill events on the exchange(s) where maker (topic2) is a target.
+            let filter = Filter::new()
+                .address(self.sources.clone())
+                .event_signature(ORDER_FILLED_TOPIC)
+                .topic2(maker_topics.clone())
+                .from_block(last + 1)
+                .to_block(latest);
+
+            let logs = provider.get_logs(&filter).await.context("get_logs")?;
+            for log in &logs {
+                if let Some(trade) = decode(log) {
+                    if tx.send(trade).await.is_err() {
+                        return Ok(());
+                    }
                 }
             }
+            last = latest;
         }
-        Ok(())
     }
 }
 
