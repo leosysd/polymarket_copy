@@ -585,7 +585,10 @@ fn show_ledger(config_path: &Path) -> Result<()> {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => {
-            println!("  暂无账本：{}", path.display());
+            println!("  还没有跟单记录（{}）。", path.display());
+            println!(
+                "  说明到现在没真正跟过单。检查：① 顶部「服务」是否运行中；\n  ② 是否还在启动窗口对齐期；③ 用「📜 实时日志」看 bot 是否在监听到成交。"
+            );
             return Ok(());
         }
     };
