@@ -5,14 +5,17 @@
 
 use crate::clob::{create_or_derive_api_creds, OrderSigner};
 use anyhow::{anyhow, Context, Result};
+use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
 use reqwest::Client;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 const ENV_PATH: &str = ".env";
 const SERVICE: &str = "pmcopy";
+const UNIT_PATH: &str = "/etc/systemd/system/pmcopy.service";
 
 pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
     ensure_config(config_path)?;
@@ -20,7 +23,7 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
 
     loop {
         let doc = load_doc(config_path)?;
-        println!("\n{}", summary_line(&doc));
+        print_banner(&doc);
 
         let items = [
             "状态",
@@ -44,7 +47,7 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
             1 => settings_menu(config_path, &theme)?,
             2 => env_menu(&theme)?,
             3 => targets_menu(config_path, &theme)?,
-            4 => service_menu(&theme)?,
+            4 => service_menu(config_path, &theme)?,
             5 => show_ledger(config_path)?,
             6 => derive_key(config_path, http).await?,
             7 => run_foreground(config_path)?,
@@ -58,7 +61,7 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
 // 状态 / 概览
 // ---------------------------------------------------------------------------
 
-fn summary_line(doc: &DocumentMut) -> String {
+fn print_banner(doc: &DocumentMut) {
     let mode = str_at(doc, &["mode"]).unwrap_or_else(|| "?".into());
     let factor = doc.get("copy_factor").and_then(|v| v.as_float()).unwrap_or(0.0);
     let n = doc
@@ -66,7 +69,42 @@ fn summary_line(doc: &DocumentMut) -> String {
         .and_then(|t| t.as_array_of_tables())
         .map(|a| a.len())
         .unwrap_or(0);
-    format!("── pmcopy ── 模式={mode}  目标={n}  copy_factor={factor} ──")
+
+    let svc = if !service_installed() {
+        style("未安装").yellow().bold()
+    } else if service_running() {
+        style("运行中").green().bold()
+    } else {
+        style("已停止").red().bold()
+    };
+    let mode_disp = if mode == "live" {
+        style("实盘 ⚠").red().bold()
+    } else {
+        style("模拟").green().bold()
+    };
+    let wss = if env_set("PM_WSS_RPC") == "已设置" {
+        style("✔ 已设置").green()
+    } else {
+        style("✘ 未设置").red()
+    };
+
+    println!("\n{}", style("══════════════════════════════════").cyan());
+    println!("🤖  {}", style("pmcopy 跟单机器人 管理菜单").bold().cyan());
+    println!("{}", style("══════════════════════════════════").cyan());
+    println!("  服务: {svc}    模式: {mode_disp}");
+    println!("  目标: {n} 个    copy_factor: {factor}    节点: {wss}");
+}
+
+fn service_installed() -> bool {
+    Path::new(UNIT_PATH).exists()
+}
+
+fn service_running() -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", SERVICE])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn status(config_path: &Path) -> Result<()> {
@@ -133,13 +171,21 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
             .interact()?;
         match choice {
             0 => {
-                let modes = ["dry_run", "live"];
+                let modes = ["dry_run  模拟（不真实下单）", "live  实盘 ⚠（真实资金）"];
                 let i = Select::with_theme(theme)
                     .with_prompt("模式")
                     .items(&modes)
                     .default(0)
                     .interact()?;
-                doc["mode"] = value(modes[i]);
+                if i == 1
+                    && !Confirm::with_theme(theme)
+                        .with_prompt("切到实盘会用真实资金下单，确认？")
+                        .default(false)
+                        .interact()?
+                {
+                    continue;
+                }
+                doc["mode"] = value(if i == 0 { "dry_run" } else { "live" });
             }
             1 => doc["copy_factor"] = value(prompt_f64(theme, "copy_factor 份数倍率（如 0.25 = 跟 25%）")?),
             2 => doc["max_slippage"] = value(prompt_f64(theme, "max_slippage 价格偏移（如 0.02 → 0.50 挂 0.52）")?),
@@ -163,8 +209,25 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
             _ => return Ok(()),
         }
         save_doc(config_path, &doc)?;
-        println!("  已保存。（需重启服务才生效）");
+        println!("  {} 已保存。", style("✔").green());
+        offer_restart(theme)?;
     }
+}
+
+/// 改完配置后，若服务在跑就问要不要重启使之生效。
+fn offer_restart(theme: &ColorfulTheme) -> Result<()> {
+    if service_installed() && service_running() {
+        if Confirm::with_theme(theme)
+            .with_prompt("重启服务使改动生效？")
+            .default(true)
+            .interact()?
+        {
+            run_cmd("sudo", &["systemctl", "restart", SERVICE]);
+        }
+    } else {
+        println!("  （改动将在下次启动机器人时生效）");
+    }
+    Ok(())
 }
 
 fn prompt_f64(theme: &ColorfulTheme, prompt: &str) -> Result<f64> {
@@ -177,6 +240,7 @@ fn prompt_f64(theme: &ColorfulTheme, prompt: &str) -> Result<f64> {
 // ---------------------------------------------------------------------------
 
 fn env_menu(theme: &ColorfulTheme) -> Result<()> {
+    let mut changed = false;
     loop {
         let sig = std::env::var("PM_SIGNATURE_TYPE").unwrap_or_else(|_| "0".into());
         let items = [
@@ -220,8 +284,14 @@ fn env_menu(theme: &ColorfulTheme) -> Result<()> {
                     .interact()?;
                 set_secret("PM_SIGNATURE_TYPE", &i.to_string())?;
             }
-            _ => return Ok(()),
+            _ => {
+                if changed {
+                    offer_restart(theme)?;
+                }
+                return Ok(());
+            }
         }
+        changed = true;
     }
 }
 
@@ -238,6 +308,7 @@ fn set_secret(key: &str, val: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn targets_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
+    let mut changed = false;
     loop {
         let mut doc = load_doc(config_path)?;
         let labels = target_labels(&doc);
@@ -279,6 +350,7 @@ fn targets_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                 t["label"] = value(label);
                 ensure_targets(&mut doc).push(t);
                 save_doc(config_path, &doc)?;
+                changed = true;
                 println!("  已添加。");
             }
             1 => {
@@ -295,10 +367,16 @@ fn targets_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                 if i < labels.len() {
                     ensure_targets(&mut doc).remove(i);
                     save_doc(config_path, &doc)?;
+                    changed = true;
                     println!("  已删除。");
                 }
             }
-            _ => return Ok(()),
+            _ => {
+                if changed {
+                    offer_restart(theme)?;
+                }
+                return Ok(());
+            }
         }
     }
 }
@@ -331,22 +409,113 @@ fn ensure_targets(doc: &mut DocumentMut) -> &mut toml_edit::ArrayOfTables {
 // 服务控制
 // ---------------------------------------------------------------------------
 
-fn service_menu(theme: &ColorfulTheme) -> Result<()> {
-    let actions = ["状态", "启动", "停止", "重启", "日志（跟随）", "返回"];
+fn service_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
+    if !service_installed() {
+        println!(
+            "\n  {} 服务还没安装（所以启动/重启会报 'Unit not found'）。",
+            style("ⓘ").cyan()
+        );
+        let opts = ["安装服务（设为后台常驻 + 开机自启）", "返回"];
+        let c = Select::with_theme(theme)
+            .with_prompt("服务")
+            .items(&opts)
+            .default(0)
+            .interact()?;
+        if c == 0 {
+            install_service(config_path)?;
+        }
+        return Ok(());
+    }
+
+    let running = if service_running() { "运行中" } else { "已停止" };
+    let actions = [
+        "启动", "停止", "重启", "状态", "日志（跟随）", "卸载服务", "返回",
+    ];
     let choice = Select::with_theme(theme)
-        .with_prompt(format!("systemd 服务 '{SERVICE}'"))
+        .with_prompt(format!("服务（当前：{running}）"))
         .items(&actions)
         .default(0)
         .interact()?;
     match choice {
-        0 => run_cmd("systemctl", &["status", SERVICE, "--no-pager"]),
-        1 => run_cmd("sudo", &["systemctl", "start", SERVICE]),
-        2 => run_cmd("sudo", &["systemctl", "stop", SERVICE]),
-        3 => run_cmd("sudo", &["systemctl", "restart", SERVICE]),
+        0 => run_cmd("sudo", &["systemctl", "start", SERVICE]),
+        1 => run_cmd("sudo", &["systemctl", "stop", SERVICE]),
+        2 => run_cmd("sudo", &["systemctl", "restart", SERVICE]),
+        3 => run_cmd("systemctl", &["status", SERVICE, "--no-pager"]),
         4 => run_cmd("journalctl", &["-u", SERVICE, "-f", "--no-pager"]),
-        _ => return Ok(()),
+        5 => {
+            if Confirm::with_theme(theme).with_prompt("确认卸载服务？").default(false).interact()? {
+                uninstall_service();
+            }
+        }
+        _ => {}
     }
     Ok(())
+}
+
+/// 生成并安装 systemd 单元（自动填当前用户、目录、二进制路径）。
+fn install_service(config_path: &Path) -> Result<()> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "root".into());
+    let dir = std::env::current_dir().context("获取当前目录")?;
+    let exe = std::env::current_exe().context("定位 pmcopy 程序")?;
+    let env_file = dir.join(ENV_PATH);
+    let cfg = if config_path.is_absolute() {
+        config_path.to_path_buf()
+    } else {
+        dir.join(config_path)
+    };
+
+    let unit = format!(
+        "[Unit]\n\
+         Description=Polymarket copy-trading bot (pmcopy)\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\n\
+         [Service]\n\
+         Type=simple\n\
+         User={user}\n\
+         WorkingDirectory={dir}\n\
+         EnvironmentFile={env}\n\
+         ExecStart={exe} --config {cfg}\n\
+         Restart=always\n\
+         RestartSec=2\n\n\
+         [Install]\n\
+         WantedBy=multi-user.target\n",
+        dir = dir.display(),
+        env = env_file.display(),
+        exe = exe.display(),
+        cfg = cfg.display(),
+    );
+
+    println!("  写入 {UNIT_PATH} (需要 sudo)...");
+    let mut child = Command::new("sudo")
+        .args(["tee", UNIT_PATH])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .context("sudo tee 写入单元文件")?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(unit.as_bytes())
+        .context("写入单元内容")?;
+    child.wait().ok();
+
+    run_cmd("sudo", &["systemctl", "daemon-reload"]);
+    run_cmd("sudo", &["systemctl", "enable", SERVICE]);
+    println!(
+        "  {} 已安装。用「服务 → 启动」开跑。",
+        style("✔").green()
+    );
+    Ok(())
+}
+
+fn uninstall_service() {
+    run_cmd("sudo", &["systemctl", "disable", "--now", SERVICE]);
+    run_cmd("sudo", &["rm", "-f", UNIT_PATH]);
+    run_cmd("sudo", &["systemctl", "daemon-reload"]);
+    println!("  {} 已卸载服务。", style("✔").green());
 }
 
 fn run_cmd(bin: &str, args: &[&str]) {

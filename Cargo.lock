@@ -2884,6 +2884,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "console",
  "dialoguer",
  "dotenvy",
  "futures-util",
