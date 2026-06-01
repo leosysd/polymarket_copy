@@ -3,60 +3,45 @@
 Polymarket 跟单机器人（Rust）。链上实时监听目标钱包的成交，按比例自动跟单。
 默认 **dry_run**（只记录、不真实下单）。
 
-## 安装
-
-需要 [Rust](https://rustup.rs) 和一个 Polygon 的 **WebSocket** RPC 地址
-（`wss://…`，[Alchemy](https://www.alchemy.com) 免费档即可）。
+## 安装（一条命令）
 
 ```bash
-git clone https://github.com/leosysd/polymarket_copy.git
-cd polymarket_copy
-
-cp config.example.toml config.toml    # 填目标钱包地址、跟单比例等
-cp .env.example .env                  # 填 PM_WSS_RPC=wss://...
-
-bash deploy/install.sh                # 编译并创建 poly 命令
+curl -fsSL https://raw.githubusercontent.com/leosysd/polymarket_copy/main/install.sh | bash
 ```
+
+它会自动装 Rust（如果没有）、拉代码、编译、并创建 `poly` 命令。
+你还需要一个 Polygon 的 **WebSocket** RPC 地址（`wss://…`，[Alchemy](https://www.alchemy.com)
+免费档即可），在菜单里填进去。
 
 ## 使用
 
-装好后，输入 **`poly`** 就能打开交互式中文菜单（改配置、管目标、看账本、控服务）：
+输入 **`poly`** 打开交互式中文菜单，所有操作都在里面：
 
 ```bash
 poly
 ```
 
-也可以直接跑：
+菜单里能：填节点/私钥、加跟单地址、调跟单比例和滑点、切模拟/实盘、装/启停服务、看账本、**更新程序**。
 
-```bash
-pmcopy            # 直接运行机器人（默认 dry_run，只记录不下单）
-pmcopy menu       # 等同于 poly
-```
+> 先跑 **模拟**（默认）确认跟单逻辑没问题，再切实盘。开实盘需在「连接」里填私钥，
+> API 凭证会自动派生；第一次用很小的跟单比例试。
 
-开实盘：菜单里把 `mode` 改成 `live`，并在 `.env` 填 `PM_PRIVATE_KEY`（API 凭证会自动派生）。
-建议先用很小的 `copy_factor` 试。
+## 更新
 
-可选：作为后台服务常驻（VPS）
+两种方式都行：
 
-```bash
-sudo cp deploy/pmcopy.service /etc/systemd/system/
-sudo nano /etc/systemd/system/pmcopy.service    # 改 User=
-sudo systemctl enable --now pmcopy
-```
+- 菜单里选 **⬆️ 更新程序**（git pull + 重新编译）
+- 或重跑上面那条一键安装命令
 
 ## 卸载
 
 ```bash
-# 如果装了后台服务：
-sudo systemctl disable --now pmcopy
-sudo rm /etc/systemd/system/pmcopy.service
-sudo systemctl daemon-reload
-
-# 删掉程序目录：
+poly        # 进菜单 → 服务 → 卸载服务（若装过服务）
 rm -rf ~/polymarket_copy
+sudo rm -f /usr/local/bin/poly /usr/local/bin/pmcopy
 ```
 
-没有别的系统文件或数据库要清理。如果创建过 CLOB API key，记得去 Polymarket 吊销。
+如果创建过 CLOB API key，记得去 Polymarket 吊销。
 
 ---
 

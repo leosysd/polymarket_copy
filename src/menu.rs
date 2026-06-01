@@ -26,18 +26,19 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
         print_banner(&doc);
 
         let items = [
-            "状态",
-            "设置（模式 / 份数 / 滑点 / 订单类型 / 金额）",
-            "连接与密钥（WS 节点 / 私钥 / 资金地址）",
-            "目标钱包（添加 / 删除）",
-            "服务（systemd 启动 / 停止 / 重启）",
-            "账本（最近跟单）",
-            "派生并保存 API key",
-            "立即运行（前台）",
-            "退出",
+            "📊  状态",
+            "⚙️   设置（跟单比例 / 滑点 / 模式）",
+            "🔌  连接（节点 / 私钥）",
+            "🎯  跟单地址（添加 / 删除）",
+            "🚀  服务（安装 / 启停 / 重启）",
+            "📒  账本（最近跟单）",
+            "🔑  派生 API key",
+            "▶   立即运行（前台）",
+            "⬆️   更新程序",
+            "❌  退出",
         ];
         let choice = Select::with_theme(&theme)
-            .with_prompt("管理")
+            .with_prompt("选择操作")
             .items(&items)
             .default(0)
             .interact()?;
@@ -51,6 +52,7 @@ pub async fn run(config_path: &Path, http: &Client) -> Result<()> {
             5 => show_ledger(config_path)?,
             6 => derive_key(config_path, http).await?,
             7 => run_foreground(config_path)?,
+            8 => update_self(&theme)?,
             _ => break,
         }
     }
@@ -152,18 +154,17 @@ fn env_set(key: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 
 fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
-    let items = [
-        "mode 模式 (dry_run / live)",
-        "copy_factor 份数倍率",
-        "max_slippage 滑点(绝对偏移)",
-        "order_type 订单类型",
-        "min_order_usdc 单笔最小金额",
-        "max_order_usdc 单笔最大金额",
-        "only_buys 只跟买入",
-        "返回",
-    ];
     loop {
         let mut doc = load_doc(config_path)?;
+        let factor = doc.get("copy_factor").and_then(|v| v.as_float()).unwrap_or(0.0);
+        let slip = doc.get("max_slippage").and_then(|v| v.as_float()).unwrap_or(0.0);
+        let mode = str_at(&doc, &["mode"]).unwrap_or_default();
+        let items = [
+            format!("跟单比例 copy_factor      [{factor}]"),
+            format!("滑点 max_slippage         [{slip}]"),
+            format!("模式 mode                 [{mode}]"),
+            "返回".to_string(),
+        ];
         let choice = Select::with_theme(theme)
             .with_prompt("要修改哪一项")
             .items(&items)
@@ -171,6 +172,14 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
             .interact()?;
         match choice {
             0 => {
+                doc["copy_factor"] =
+                    value(prompt_f64(theme, "跟单比例（如 0.25 = 跟目标的 25%）")?)
+            }
+            1 => {
+                doc["max_slippage"] =
+                    value(prompt_f64(theme, "滑点价格偏移（如 0.02 → 目标 0.50 挂 0.52）")?)
+            }
+            2 => {
                 let modes = ["dry_run  模拟（不真实下单）", "live  实盘 ⚠（真实资金）"];
                 let i = Select::with_theme(theme)
                     .with_prompt("模式")
@@ -186,25 +195,6 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                     continue;
                 }
                 doc["mode"] = value(if i == 0 { "dry_run" } else { "live" });
-            }
-            1 => doc["copy_factor"] = value(prompt_f64(theme, "copy_factor 份数倍率（如 0.25 = 跟 25%）")?),
-            2 => doc["max_slippage"] = value(prompt_f64(theme, "max_slippage 价格偏移（如 0.02 → 0.50 挂 0.52）")?),
-            3 => {
-                let types = ["FAK", "FOK", "GTC", "GTD"];
-                let i = Select::with_theme(theme)
-                    .with_prompt("订单类型")
-                    .items(&types)
-                    .default(0)
-                    .interact()?;
-                doc["order_type"] = value(types[i]);
-            }
-            4 => doc["min_order_usdc"] = value(prompt_f64(theme, "min_order_usdc 单笔最小 USDC")?),
-            5 => doc["max_order_usdc"] = value(prompt_f64(theme, "max_order_usdc 单笔最大 USDC")?),
-            6 => {
-                let on = Confirm::with_theme(theme)
-                    .with_prompt("only_buys（只跟买入/进场，忽略卖出）？")
-                    .interact()?;
-                doc["only_buys"] = value(on);
             }
             _ => return Ok(()),
         }
@@ -516,6 +506,38 @@ fn uninstall_service() {
     run_cmd("sudo", &["rm", "-f", UNIT_PATH]);
     run_cmd("sudo", &["systemctl", "daemon-reload"]);
     println!("  {} 已卸载服务。", style("✔").green());
+}
+
+// ---------------------------------------------------------------------------
+// 更新程序
+// ---------------------------------------------------------------------------
+
+/// git pull + 重新编译，并刷新已安装到 /usr/local/bin 的二进制。
+fn update_self(theme: &ColorfulTheme) -> Result<()> {
+    println!("\n  {} 拉取最新代码 (git pull)...", style("==>").cyan());
+    run_cmd("git", &["pull", "--ff-only"]);
+    println!("  {} 重新编译（可能几分钟）...", style("==>").cyan());
+    let ok = Command::new("cargo")
+        .args(["build", "--release"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        println!("  {} 编译失败，未更新。", style("✘").red());
+        return Ok(());
+    }
+    if Path::new("/usr/local/bin/pmcopy").exists() {
+        run_cmd(
+            "sudo",
+            &["install", "-m0755", "target/release/pmcopy", "/usr/local/bin/pmcopy"],
+        );
+    }
+    println!(
+        "  {} 更新完成。重新运行 poly 用上新版本。",
+        style("✔").green()
+    );
+    offer_restart(theme)?;
+    Ok(())
 }
 
 fn run_cmd(bin: &str, args: &[&str]) {
