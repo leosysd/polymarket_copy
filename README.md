@@ -22,7 +22,11 @@ cp .env.example .env                 # set PM_WSS_RPC=wss://...
 ## Usage
 
 ```bash
-# run the bot (dry-run by default)
+# interactive management menu — configure, manage targets, control the
+# service, view the ledger, derive keys (recommended; arrow keys to navigate)
+./target/release/pmcopy menu
+
+# run the bot directly (dry-run by default)
 ./target/release/pmcopy
 
 # use a specific config file

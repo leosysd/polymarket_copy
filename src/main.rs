@@ -7,6 +7,7 @@
 mod clob;
 mod config;
 mod executor;
+mod menu;
 mod models;
 mod monitor;
 mod sizing;
@@ -32,7 +33,7 @@ use tracing::{debug, info, warn};
 #[command(name = "pmcopy", about = "Polymarket copy-trading bot (on-chain, low-latency)")]
 struct Args {
     /// Path to the TOML config file.
-    #[arg(short, long, default_value = "config.toml")]
+    #[arg(short, long, global = true, default_value = "config.toml")]
     config: PathBuf,
 
     #[command(subcommand)]
@@ -41,6 +42,8 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Interactive management menu (configure, control service, view ledger).
+    Menu,
     /// Derive CLOB API credentials from PM_PRIVATE_KEY and print them for .env.
     DeriveKey,
 }
@@ -51,12 +54,17 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing();
 
-    let mut cfg = Config::load(&args.config)?;
     let http = Client::builder()
         .user_agent(concat!("pmcopy/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
         .build()?;
 
+    // The menu must work before a full (valid) config exists, so handle it first.
+    if let Some(Command::Menu) = args.command {
+        return menu::run(&args.config, &http).await;
+    }
+
+    let mut cfg = Config::load(&args.config)?;
     if let Some(Command::DeriveKey) = args.command {
         return derive_and_print(&http, &cfg).await;
     }
