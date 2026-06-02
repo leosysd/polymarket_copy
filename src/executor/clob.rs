@@ -13,7 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::Normal;
-use polymarket_client_sdk_v2::clob::types::{OrderType, SignatureType, Side as PmSide};
+use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, SignatureType, Side as PmSide};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{Decimal, U256};
 use polymarket_client_sdk_v2::POLYGON;
@@ -77,44 +77,48 @@ impl ClobExecutor {
 #[async_trait]
 impl OrderExecutor for ClobExecutor {
     async fn execute(&self, order: &CopyOrder) -> Result<ExecOutcome> {
-        let side = match order.side {
-            Side::Buy => PmSide::Buy,
-            Side::Sell => PmSide::Sell,
-        };
-        // Polymarket needs BUY notional (price*size) to be <= 2 decimals: price is
-        // 2-dec, so round size to an integer (matches the working JY bot).
-        let limit = (order.price * 100.0).round() / 100.0;
-        let order_shares = order.size_shares.round().max(1.0);
-        let price = Decimal::from_str(&format!("{limit:.2}")).context("price -> Decimal")?;
-        let size = Decimal::from_str(&format!("{order_shares:.0}")).context("size -> Decimal")?;
         let token_id =
             U256::from_str_radix(order.token_id.trim(), 10).context("token_id -> U256")?;
 
-        // Warm the SDK's tick-size + neg-risk caches concurrently. build_sign_and_post
-        // needs both; on a cold token (each 5-minute window rotates token ids) it
-        // would otherwise fetch them in two *sequential* round trips. Warming them
-        // in parallel first turns that into one. Real API values (no hardcoding);
-        // a hit if already warm. Errors are ignored — build_sign_and_post will
-        // fetch and surface the real error if these failed.
+        // Warm the SDK's tick-size + neg-risk caches concurrently (cold token =
+        // each 5-minute window rotates token ids). Real API values; a hit if warm.
         let _ = tokio::join!(self.client.tick_size(token_id), self.client.neg_risk(token_id));
 
-        // build + sign + post in one call (handles tick size, neg-risk, contracts).
-        let resp = self
-            .client
-            .limit_order()
-            .token_id(token_id)
-            .size(size)
-            .price(price)
-            .side(side)
-            .order_type(self.order_type.clone())
-            .build_sign_and_post(&self.signer)
-            .await?;
+        // MARKET order: follow the target's direction, sized proportionally.
+        //   BUY  -> spend `order.usdc` USDC (= our_shares * target price) at market.
+        //   SELL -> sell `order.size_shares` shares at market.
+        // The CLOB fills at the current market price (no manual limit).
+        let resp = match order.side {
+            Side::Buy => {
+                let usdc = Decimal::from_str(&format!("{:.2}", order.usdc))
+                    .context("usdc amount -> Decimal")?;
+                self.client
+                    .market_order()
+                    .token_id(token_id)
+                    .side(PmSide::Buy)
+                    .amount(Amount::usdc(usdc)?)
+                    .order_type(self.order_type.clone())
+                    .build_sign_and_post(&self.signer)
+                    .await?
+            }
+            Side::Sell => {
+                let shares = order.size_shares.round().max(1.0);
+                let sh = Decimal::from_str(&format!("{shares:.0}")).context("shares -> Decimal")?;
+                self.client
+                    .market_order()
+                    .token_id(token_id)
+                    .side(PmSide::Sell)
+                    .amount(Amount::shares(sh)?)
+                    .order_type(self.order_type.clone())
+                    .build_sign_and_post(&self.signer)
+                    .await?
+            }
+        };
 
         Ok(ExecOutcome {
-            // Reflect the order-level result, not just "HTTP 200": a 200 with
-            // success=false (e.g. unmatched) should not read as submitted.
+            // Reflect the order-level result, not just "HTTP 200".
             submitted: resp.success,
-            detail: format!("CLOB v2 accepted: {resp:?}"),
+            detail: format!("CLOB v2 market: {resp:?}"),
         })
     }
 

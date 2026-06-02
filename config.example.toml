@@ -12,10 +12,10 @@ mode = "dry_run"
 #   our_shares = target_shares * copy_factor * target.weight
 # Then capped/floored by the USDC limits below.
 # ---------------------------------------------------------------------------
-copy_factor = 0.10        # follow at 10% of the target's size（fixed_shares=0 时生效）
-# 固定份额模式：>0 时忽略 copy_factor 和目标大小，每次只跟「方向」、固定下这么多份。
-# 想"目标买 up，我就固定买 5 份"就设 5。配合较小的 max_slippage 让成交贴近该份数。
-fixed_shares = 0
+# 按比例跟单：our_shares = 目标份数 × copy_factor × weight。
+# 例：copy_factor=0.25，目标买 20 份 → 你买 5 份。订单按【市价单】下：
+# 买入花 (份数×目标价) 的 USDC、卖出卖对应份数，由市场实时成交。
+copy_factor = 0.25
 min_order_usdc = 1.0      # skip copies smaller than this (dust)
 max_order_usdc = 50.0     # never spend more than this on a single copy
 only_buys = true          # true = only mirror entries (BUY), ignore the target's exits

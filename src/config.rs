@@ -64,11 +64,6 @@ pub struct FileConfig {
     pub min_order_usdc: f64,
     #[serde(default = "default_max_usdc")]
     pub max_order_usdc: f64,
-    /// Fixed share size per copy. When > 0, ignore copy_factor and the target's
-    /// size — always order exactly this many shares in the target's direction.
-    /// (Use a small max_slippage so fills land on the share count, not above it.)
-    #[serde(default)]
-    pub fixed_shares: f64,
     #[serde(default)]
     pub only_buys: bool,
     /// If true, on startup wait until the next 5-minute boundary before trading
