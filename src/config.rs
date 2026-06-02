@@ -112,7 +112,9 @@ fn default_order_type() -> String {
     "FAK".to_string()
 }
 fn default_aggregate_window_ms() -> u64 {
-    400
+    // Off by default: copy each fill immediately (lowest latency). Raise it only
+    // if your target splits one intent into several near-simultaneous orders.
+    0
 }
 fn default_market_filter() -> String {
     // Empty = no market filtering (copy all of the target's trades).

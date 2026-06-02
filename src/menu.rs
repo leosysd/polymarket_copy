@@ -161,7 +161,7 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
         let factor = doc.get("copy_factor").and_then(|v| v.as_float()).unwrap_or(0.0);
         let slip = doc.get("max_slippage").and_then(|v| v.as_float()).unwrap_or(0.0);
         let mode = str_at(&doc, &["mode"]).unwrap_or_default();
-        let aggw = doc.get("aggregate_window_ms").and_then(|v| v.as_integer()).unwrap_or(400);
+        let aggw = doc.get("aggregate_window_ms").and_then(|v| v.as_integer()).unwrap_or(0);
         let mkt_cap = doc.get("max_market_usdc").and_then(|v| v.as_float()).unwrap_or(0.0);
         let items = [
             format!("跟单比例 copy_factor      [{factor}]"),
@@ -247,10 +247,25 @@ fn env_menu(theme: &ColorfulTheme) -> Result<()> {
     let mut changed = false;
     loop {
         let sig = std::env::var("PM_SIGNATURE_TYPE").unwrap_or_else(|_| "0".into());
+        // Funder is REQUIRED for proxy/deposit account types (1/2/3); only a
+        // plain EOA (type 0) may leave it empty. Surface that prominently.
+        let needs_funder = sig.trim() != "0";
+        let funder_missing = needs_funder && env_set("PM_FUNDER_ADDRESS") == "未设置";
+        let funder_hint = if needs_funder {
+            "资金地址（类型 1/2/3 必填）"
+        } else {
+            "资金地址（类型 0 可留空）"
+        };
+        if funder_missing {
+            println!(
+                "\n  {} 账户类型 {sig} 必须填 PM_FUNDER_ADDRESS（你的 Polymarket 存款/代理地址），\n     否则实盘启动会直接报错退出。",
+                style("⚠ 缺资金地址").red().bold()
+            );
+        }
         let items = [
             format!("PM_WSS_RPC（Polygon wss 节点）        [{}]", env_set("PM_WSS_RPC")),
             format!("PM_PRIVATE_KEY（下单私钥）            [{}]", env_set("PM_PRIVATE_KEY")),
-            format!("PM_FUNDER_ADDRESS（资金地址，可空）   [{}]", env_set("PM_FUNDER_ADDRESS")),
+            format!("PM_FUNDER_ADDRESS（{funder_hint}）   [{}]", env_set("PM_FUNDER_ADDRESS")),
             format!("PM_SIGNATURE_TYPE（账户类型）         [{sig}]"),
             "返回".to_string(),
         ];
@@ -274,7 +289,7 @@ fn env_menu(theme: &ColorfulTheme) -> Result<()> {
             }
             2 => {
                 let v: String = Input::with_theme(theme)
-                    .with_prompt("PM_FUNDER_ADDRESS (留空=用私钥地址)")
+                    .with_prompt("PM_FUNDER_ADDRESS (Polymarket 存款/代理地址 0x…；类型 0 普通钱包可留空)")
                     .allow_empty(true)
                     .interact_text()?;
                 set_secret("PM_FUNDER_ADDRESS", v.trim())?;
@@ -292,6 +307,21 @@ fn env_menu(theme: &ColorfulTheme) -> Result<()> {
                     .default(0)
                     .interact()?;
                 set_secret("PM_SIGNATURE_TYPE", &i.to_string())?;
+                // Proxy/deposit types need a funder; prompt for it right away if
+                // it's still empty, so the user can't leave the menu mis-configured.
+                if i != 0 && env_set("PM_FUNDER_ADDRESS") == "未设置" {
+                    println!(
+                        "  {} 类型 {i} 需要资金地址。",
+                        style("ⓘ").cyan()
+                    );
+                    let v: String = Input::with_theme(theme)
+                        .with_prompt("现在填 PM_FUNDER_ADDRESS (0x…，可暂时留空稍后填)")
+                        .allow_empty(true)
+                        .interact_text()?;
+                    if !v.trim().is_empty() {
+                        set_secret("PM_FUNDER_ADDRESS", v.trim())?;
+                    }
+                }
             }
             _ => {
                 if changed {

@@ -18,9 +18,9 @@ max_order_usdc = 50.0     # never spend more than this on a single copy
 only_buys = true          # true = only mirror entries (BUY), ignore the target's exits
 
 # 把目标在同一结果上、极短时间内的多笔成交合并成「一笔」再下单。
-# 适合「分批建仓 / 同时下多笔」的目标：避免每个小切片被 min_order_usdc 卡掉，
-# 也减少下单次数、降低同块多笔互相排队的延迟。单位毫秒；0 = 不合并，逐笔跟。
-aggregate_window_ms = 400
+# 默认 0 = 不合并、逐笔即时跟（延迟最低）。仅当目标会把一次意图拆成多笔
+# 几乎同时的订单、且小切片被 min_order_usdc 卡掉时，才调大（如 100~150ms）。
+aggregate_window_ms = 0
 
 # 单个结果 token（盘口的某一边）累计下单 USDC 上限：达到后该 token 不再跟。
 # 给「只买入、持有到结算」这类只加仓、不减仓的目标加一道总量闸。
