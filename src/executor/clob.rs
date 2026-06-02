@@ -90,6 +90,14 @@ impl OrderExecutor for ClobExecutor {
         let token_id =
             U256::from_str_radix(order.token_id.trim(), 10).context("token_id -> U256")?;
 
+        // Warm the SDK's tick-size + neg-risk caches concurrently. build_sign_and_post
+        // needs both; on a cold token (each 5-minute window rotates token ids) it
+        // would otherwise fetch them in two *sequential* round trips. Warming them
+        // in parallel first turns that into one. Real API values (no hardcoding);
+        // a hit if already warm. Errors are ignored — build_sign_and_post will
+        // fetch and surface the real error if these failed.
+        let _ = tokio::join!(self.client.tick_size(token_id), self.client.neg_risk(token_id));
+
         // build + sign + post in one call (handles tick size, neg-risk, contracts).
         let resp = self
             .client
@@ -103,7 +111,9 @@ impl OrderExecutor for ClobExecutor {
             .await?;
 
         Ok(ExecOutcome {
-            submitted: true,
+            // Reflect the order-level result, not just "HTTP 200": a 200 with
+            // success=false (e.g. unmatched) should not read as submitted.
+            submitted: resp.success,
             detail: format!("CLOB v2 accepted: {resp:?}"),
         })
     }

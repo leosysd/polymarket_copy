@@ -226,6 +226,8 @@ fn decode(log: &Log) -> Option<TargetTrade> {
             .unwrap_or_default(),
         log_index: log.log_index.unwrap_or_default(),
         received_at: std::time::Instant::now(),
+        recv_unix_ms: chrono::Utc::now().timestamp_millis(),
+        block_time: log.block_timestamp,
     })
 }
 

@@ -35,6 +35,12 @@ pub struct TargetTrade {
     pub log_index: u64,
     /// When we received/decoded this fill — used to measure our own latency.
     pub received_at: std::time::Instant,
+    /// Wall-clock (unix ms) at decode — paired with `block_time` for the
+    /// "chain → we received it" detection latency.
+    pub recv_unix_ms: i64,
+    /// Block timestamp (unix seconds) of the fill, if the RPC provider includes
+    /// it on the log. None when absent (some providers omit it on subscriptions).
+    pub block_time: Option<u64>,
 }
 
 impl TargetTrade {

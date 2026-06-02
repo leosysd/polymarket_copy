@@ -232,6 +232,9 @@ struct Pending {
     usdc: f64,
     /// Earliest fill instant in the group — drives the flush deadline and proc_ms.
     first_at: Instant,
+    /// Wall-clock + block time of the earliest fill (for detection latency).
+    recv_unix_ms: i64,
+    block_time: Option<u64>,
     tx_hash: String,
     /// Dedup keys to mark seen once the group is flushed.
     keys: Vec<String>,
@@ -248,6 +251,8 @@ impl Pending {
             shares: 0.0,
             usdc: 0.0,
             first_at: t.received_at,
+            recv_unix_ms: t.recv_unix_ms,
+            block_time: t.block_time,
             tx_hash: t.tx_hash.clone(),
             keys: Vec::new(),
             seen: HashSet::new(),
@@ -262,6 +267,8 @@ impl Pending {
         self.usdc += t.usdc;
         if t.received_at < self.first_at {
             self.first_at = t.received_at;
+            self.recv_unix_ms = t.recv_unix_ms;
+            self.block_time = t.block_time;
         }
         self.keys.push(key);
     }
@@ -280,6 +287,8 @@ impl Pending {
                 tx_hash: self.tx_hash,
                 log_index: 0,
                 received_at: self.first_at,
+                recv_unix_ms: self.recv_unix_ms,
+                block_time: self.block_time,
             },
             self.keys,
         )
@@ -358,8 +367,16 @@ async fn copy_one(
             match executor.execute(&order).await {
                 Ok(out) => {
                     *spent.entry(order.token_id.clone()).or_insert(0.0) += order.usdc;
-                    // Our own latency: from the earliest coalesced fill to submit.
+                    // proc_ms: our processing — from receiving the fill to submit.
                     let proc_ms = trade.received_at.elapsed().as_millis();
+                    // detect_ms: chain → we received it. Needs the provider to put
+                    // block_timestamp on the log (some omit it on subscriptions).
+                    let detect_ms: Option<i64> = trade.block_time.and_then(|bt| {
+                        let bt_ms = (bt as i64) * 1000;
+                        (bt_ms > 0).then(|| (trade.recv_unix_ms - bt_ms).max(0))
+                    });
+                    // total_ms: full copy latency (target's fill mined → our submit).
+                    let total_ms = detect_ms.map(|d| d + proc_ms as i64);
                     info!(
                         side = order.side.as_str(),
                         shares = order.size_shares,
@@ -367,6 +384,8 @@ async fn copy_one(
                         usdc = format!("{:.2}", order.usdc),
                         submitted = out.submitted,
                         proc_ms,
+                        detect_ms = detect_ms.map(|d| d.to_string()).unwrap_or_else(|| "n/a".into()),
+                        total_ms = total_ms.map(|d| d.to_string()).unwrap_or_else(|| "n/a".into()),
                         detail = %out.detail,
                         "COPY"
                     );
@@ -374,7 +393,7 @@ async fn copy_one(
                     // the ledger so the menu can group copies per market.
                     let (market, outcome) =
                         cached_market(http, &cfg.file.endpoints.gamma, &order.token_id, slug_cache).await;
-                    append_ledger(cfg, &order, &out, proc_ms, &market, &outcome);
+                    append_ledger(cfg, &order, &out, proc_ms, detect_ms, &market, &outcome);
                 }
                 Err(e) => warn!(error = %e, token = %order.token_id, "order execution failed"),
             }
@@ -430,6 +449,7 @@ fn append_ledger(
     order: &CopyOrder,
     out: &ExecOutcome,
     proc_ms: u128,
+    detect_ms: Option<i64>,
     market: &str,
     outcome: &str,
 ) {
@@ -445,6 +465,8 @@ fn append_ledger(
         "ref_price": order.ref_price,
         "usdc": order.usdc,
         "proc_ms": proc_ms,
+        "detect_ms": detect_ms,
+        "total_ms": detect_ms.map(|d| d + proc_ms as i64),
         "token_id": order.token_id,
         "target_label": order.target_label,
         "detail": out.detail,
