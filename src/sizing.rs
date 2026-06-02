@@ -52,10 +52,13 @@ pub fn build_order(
     // units), e.g. target 0.50 + 0.02 -> BUY limit 0.52.
     let slip = cfg.max_slippage;
     let limit_price = match trade.side {
-        Side::Buy => (trade.price + slip).min(0.999),
-        Side::Sell => (trade.price - slip).max(0.001),
+        Side::Buy => (trade.price + slip).min(0.99),
+        Side::Sell => (trade.price - slip).max(0.01),
     };
-    let limit_price = round_price(limit_price);
+    // Clamp to the valid 2-decimal tick range. The old 0.999 cap rounded to
+    // cents became 1.00, which the CLOB rejects ("too large for tick size") —
+    // that silently killed every copy once slippage pushed the limit to the cap.
+    let limit_price = round_price(limit_price).clamp(0.01, 0.99);
     let shares = round_shares(shares);
 
     Ok(CopyOrder {
