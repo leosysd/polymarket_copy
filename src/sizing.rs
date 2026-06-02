@@ -35,11 +35,17 @@ pub fn build_order(
         return Err(Skip::BadPrice);
     }
 
-    // Proportional sizing: scale the target's share count.
-    let mut shares = trade.shares * cfg.copy_factor * target.weight;
-    let mut usdc = shares * trade.price;
+    // Sizing: either a fixed share count (follow the target's direction only),
+    // or proportional to the target's size.
+    let (mut shares, mut usdc) = if cfg.fixed_shares > 0.0 {
+        (cfg.fixed_shares, cfg.fixed_shares * trade.price)
+    } else {
+        let s = trade.shares * cfg.copy_factor * target.weight;
+        (s, s * trade.price)
+    };
 
-    // Clamp to the per-copy USDC ceiling.
+    // Per-copy USDC ceiling. In fixed-share mode this only bites if a single
+    // fixed order would exceed the cap; otherwise the fixed count is kept.
     if usdc > cfg.max_order_usdc {
         usdc = cfg.max_order_usdc;
         shares = usdc / trade.price;
