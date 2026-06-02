@@ -39,6 +39,10 @@ max_slippage = 0.02
 #   "GTC" = leftover rests on the book as a limit order.
 order_type = "FAK"
 
+# 窗口对齐：true = 若在 5 分钟窗口中途启动，先等到下个整点边界再下单（跳过进行中的窗口）。
+# 默认 false = 立即开始跟单、重启即时生效，不浪费当前窗口（延迟更友好，推荐保持 false）。
+align_to_window = false
+
 # 市场过滤：只复制「市场 slug 含此关键词」的成交（不区分大小写）。
 # 留空 "" = 不过滤，跟目标在所有市场的交易（默认）。
 # 想只跟 BTC 5 分钟就填 "btc-updown-5m"。
