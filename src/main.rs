@@ -23,9 +23,9 @@ use alloy::primitives::Address;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use reqwest::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::signal;
 use tracing::{debug, info, warn};
 
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         return menu::run(&args.config, &http).await;
     }
 
-    let mut cfg = Config::load(&args.config)?;
+    let cfg = Config::load(&args.config)?;
     if let Some(Command::DeriveKey) = args.command {
         return derive_and_print(&http, &cfg).await;
     }
@@ -133,23 +133,72 @@ async fn main() -> Result<()> {
     let monitor = ChainMonitor::new(cfg.wss_rpc().to_string(), sources, targets);
     let mut trades = monitor.spawn();
 
-    // token_id -> whether its market matches the filter (resolved once, cached).
+    // token_id -> (market slug, outcome), resolved once via Gamma and cached.
     let mut slug_cache: HashMap<String, (String, String)> = HashMap::new();
+    // token_id -> cumulative USDC we've placed, for the per-market exposure cap.
+    let mut spent: HashMap<String, f64> = HashMap::new();
+    // Fills awaiting aggregation, keyed by target|token|side. Flushed once the
+    // oldest fill in the group is `aggregate_window_ms` old.
+    let mut pending: HashMap<String, Pending> = HashMap::new();
+    let agg_window = Duration::from_millis(cfg.file.aggregate_window_ms);
+
+    // A small flush cadence drives both the aggregation deadline check and the
+    // (debounced) state persist, so neither blocks the receive path per-fill.
+    let mut flush_tick = tokio::time::interval(Duration::from_millis(50));
+    flush_tick.tick().await; // drop the immediate first tick
+    let mut save_tick = tokio::time::interval(Duration::from_secs(2));
+    save_tick.tick().await;
 
     loop {
         tokio::select! {
             maybe_trade = trades.recv() => {
                 match maybe_trade {
                     Some(trade) => {
-                        handle_trade(&trade, &by_addr, &cfg, &mut state, executor.as_ref(), trade_enabled_at, &http, &mut slug_cache).await;
-                        if let Err(e) = state.save() {
-                            warn!(error = %e, "failed to persist state");
+                        let key = trade.dedup_key();
+                        if state.has_seen(&key) {
+                            continue;
+                        }
+                        if cfg.file.aggregate_window_ms == 0 {
+                            // No aggregation: copy each fill on its own.
+                            copy_one(&trade, 1, &by_addr, &cfg, executor.as_ref(),
+                                trade_enabled_at, &http, &mut slug_cache, &mut spent).await;
+                            state.mark_seen(key);
+                        } else {
+                            let pkey = format!(
+                                "{}|{}|{}",
+                                trade.target.to_lowercase(), trade.token_id, trade.side.as_str()
+                            );
+                            pending.entry(pkey)
+                                .or_insert_with(|| Pending::new(&trade))
+                                .add(&trade, key);
                         }
                     }
                     None => {
                         warn!("monitor channel closed; exiting");
                         break;
                     }
+                }
+            }
+            _ = flush_tick.tick() => {
+                let ready: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, p)| p.first_at.elapsed() >= agg_window)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in ready {
+                    if let Some(p) = pending.remove(&k) {
+                        let (trade, keys) = p.into_trade();
+                        copy_one(&trade, keys.len(), &by_addr, &cfg, executor.as_ref(),
+                            trade_enabled_at, &http, &mut slug_cache, &mut spent).await;
+                        for key in keys {
+                            state.mark_seen(key);
+                        }
+                    }
+                }
+            }
+            _ = save_tick.tick() => {
+                if let Err(e) = state.save() {
+                    warn!(error = %e, "failed to persist state");
                 }
             }
             _ = signal::ctrl_c() => {
@@ -159,25 +208,99 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Drain anything still aggregating so a clean shutdown never drops a fill.
+    for (_, p) in pending.drain() {
+        let (trade, keys) = p.into_trade();
+        copy_one(&trade, keys.len(), &by_addr, &cfg, executor.as_ref(),
+            trade_enabled_at, &http, &mut slug_cache, &mut spent).await;
+        for key in keys {
+            state.mark_seen(key);
+        }
+    }
+
     state.save()?;
     Ok(())
 }
 
-async fn handle_trade(
+/// Fills of the same (target, outcome, side) accumulated within the aggregation
+/// window, to be mirrored as a single combined order.
+struct Pending {
+    target: String,
+    side: crate::models::Side,
+    token_id: String,
+    shares: f64,
+    usdc: f64,
+    /// Earliest fill instant in the group — drives the flush deadline and proc_ms.
+    first_at: Instant,
+    tx_hash: String,
+    /// Dedup keys to mark seen once the group is flushed.
+    keys: Vec<String>,
+    /// In-window dedup (subscription + getLogs can deliver the same fill twice).
+    seen: HashSet<String>,
+}
+
+impl Pending {
+    fn new(t: &TargetTrade) -> Pending {
+        Pending {
+            target: t.target.clone(),
+            side: t.side,
+            token_id: t.token_id.clone(),
+            shares: 0.0,
+            usdc: 0.0,
+            first_at: t.received_at,
+            tx_hash: t.tx_hash.clone(),
+            keys: Vec::new(),
+            seen: HashSet::new(),
+        }
+    }
+
+    fn add(&mut self, t: &TargetTrade, key: String) {
+        if !self.seen.insert(key.clone()) {
+            return; // duplicate delivery within the window
+        }
+        self.shares += t.shares;
+        self.usdc += t.usdc;
+        if t.received_at < self.first_at {
+            self.first_at = t.received_at;
+        }
+        self.keys.push(key);
+    }
+
+    /// Collapse into one synthetic trade priced at the size-weighted average.
+    fn into_trade(self) -> (TargetTrade, Vec<String>) {
+        let price = if self.shares > 0.0 { self.usdc / self.shares } else { 0.0 };
+        (
+            TargetTrade {
+                target: self.target,
+                side: self.side,
+                token_id: self.token_id,
+                price,
+                shares: self.shares,
+                usdc: self.usdc,
+                tx_hash: self.tx_hash,
+                log_index: 0,
+                received_at: self.first_at,
+            },
+            self.keys,
+        )
+    }
+}
+
+/// Mirror one (possibly aggregated) target fill. Dedup/`mark_seen` is handled by
+/// the caller; this only decides and submits. `n_fills` is how many on-chain
+/// fills were coalesced into this order (1 when aggregation is off).
+#[allow(clippy::too_many_arguments)]
+async fn copy_one(
     trade: &TargetTrade,
+    n_fills: usize,
     by_addr: &HashMap<String, Target>,
     cfg: &Config,
-    state: &mut State,
     executor: &dyn OrderExecutor,
     trade_enabled_at: i64,
     http: &Client,
     slug_cache: &mut HashMap<String, (String, String)>,
+    spent: &mut HashMap<String, f64>,
 ) {
-    let key = trade.dedup_key();
-    if state.has_seen(&key) {
-        return;
-    }
-
     let Some(target) = by_addr.get(&trade.target.to_lowercase()) else {
         // Shouldn't happen (the filter is by target), but be defensive.
         debug!(target = %trade.target, "fill from untracked address; ignoring");
@@ -191,7 +314,6 @@ async fn handle_trade(
             cached_market(http, &cfg.file.endpoints.gamma, &trade.token_id, slug_cache).await;
         if !slug.to_lowercase().contains(&filter) {
             debug!(target = %trade.target, "非目标市场，跳过");
-            state.mark_seen(key);
             return;
         }
     }
@@ -202,6 +324,7 @@ async fn handle_trade(
         shares = trade.shares,
         price = format!("{:.3}", trade.price),
         usdc = format!("{:.2}", trade.usdc),
+        fills = n_fills,
         tx = %trade.tx_hash,
         "target fill"
     );
@@ -210,44 +333,67 @@ async fn handle_trade(
     let now = chrono::Utc::now().timestamp();
     if now < trade_enabled_at {
         info!(wait_s = trade_enabled_at - now, "窗口对齐中，本笔不下单");
-        state.mark_seen(key);
         return;
     }
 
     match sizing::build_order(trade, target, &cfg.file) {
-        Ok(order) => match executor.execute(&order).await {
-            Ok(out) => {
-                // Our own latency: from receiving the on-chain fill to submitting.
-                let proc_ms = trade.received_at.elapsed().as_millis();
-                info!(
-                    side = order.side.as_str(),
-                    shares = order.size_shares,
-                    price = order.price,
-                    usdc = format!("{:.2}", order.usdc),
-                    submitted = out.submitted,
-                    proc_ms,
-                    detail = %out.detail,
-                    "COPY"
-                );
-                // Resolve the market now (it's live) and store slug+outcome in the
-                // ledger so the menu can group copies into per-market tables.
-                let (market, outcome) =
-                    cached_market(http, &cfg.file.endpoints.gamma, &order.token_id, slug_cache).await;
-                append_ledger(cfg, &order, &out, proc_ms, &market, &outcome);
+        Ok(order) => {
+            // Per-market exposure cap: stop adding to a token once we've placed
+            // `max_market_usdc` on it (counts dry-run too, so the ceiling can be
+            // validated before going live).
+            let cap = cfg.file.max_market_usdc;
+            if cap > 0.0 {
+                let already = spent.get(&order.token_id).copied().unwrap_or(0.0);
+                if already + order.usdc > cap {
+                    info!(
+                        token = %order.token_id,
+                        already = format!("{already:.2}"),
+                        add = format!("{:.2}", order.usdc),
+                        cap = format!("{cap:.2}"),
+                        "达到单盘口累计上限，跳过"
+                    );
+                    return;
+                }
             }
-            Err(e) => warn!(error = %e, key = %key, "order execution failed"),
-        },
+            match executor.execute(&order).await {
+                Ok(out) => {
+                    *spent.entry(order.token_id.clone()).or_insert(0.0) += order.usdc;
+                    // Our own latency: from the earliest coalesced fill to submit.
+                    let proc_ms = trade.received_at.elapsed().as_millis();
+                    info!(
+                        side = order.side.as_str(),
+                        shares = order.size_shares,
+                        price = order.price,
+                        usdc = format!("{:.2}", order.usdc),
+                        submitted = out.submitted,
+                        proc_ms,
+                        detail = %out.detail,
+                        "COPY"
+                    );
+                    // Resolve the market (it's live now) and store slug+outcome in
+                    // the ledger so the menu can group copies per market.
+                    let (market, outcome) =
+                        cached_market(http, &cfg.file.endpoints.gamma, &order.token_id, slug_cache).await;
+                    append_ledger(cfg, &order, &out, proc_ms, &market, &outcome);
+                }
+                Err(e) => warn!(error = %e, token = %order.token_id, "order execution failed"),
+            }
+        }
         Err(skip) => debug!(reason = %skip, "skip trade"),
     }
-
-    // Mark seen after the attempt so a restart never double-submits.
-    state.mark_seen(key);
 }
 
 /// Resolve a CLOB token id to (market slug, outcome) via the Gamma API.
 async fn resolve_market(http: &Client, gamma: &str, token_id: &str) -> Option<(String, String)> {
     let url = format!("{}/markets?clob_token_ids={}", gamma.trim_end_matches('/'), token_id);
-    let resp = http.get(&url).send().await.ok()?;
+    // Short timeout: this can sit on the pre-trade path (market filter), so never
+    // let a slow Gamma stall a copy for the full client timeout.
+    let resp = http
+        .get(&url)
+        .timeout(Duration::from_millis(1500))
+        .send()
+        .await
+        .ok()?;
     let text = resp.text().await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let m = v.get(0)?;

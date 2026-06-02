@@ -161,10 +161,14 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
         let factor = doc.get("copy_factor").and_then(|v| v.as_float()).unwrap_or(0.0);
         let slip = doc.get("max_slippage").and_then(|v| v.as_float()).unwrap_or(0.0);
         let mode = str_at(&doc, &["mode"]).unwrap_or_default();
+        let aggw = doc.get("aggregate_window_ms").and_then(|v| v.as_integer()).unwrap_or(400);
+        let mkt_cap = doc.get("max_market_usdc").and_then(|v| v.as_float()).unwrap_or(0.0);
         let items = [
             format!("跟单比例 copy_factor      [{factor}]"),
             format!("滑点 max_slippage         [{slip}]"),
             format!("模式 mode                 [{mode}]"),
+            format!("合并窗口 aggregate_window_ms [{aggw}]"),
+            format!("单盘口上限 max_market_usdc   [{mkt_cap}]"),
             "返回".to_string(),
         ];
         let choice = Select::with_theme(theme)
@@ -180,6 +184,14 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
             1 => {
                 doc["max_slippage"] =
                     value(prompt_f64(theme, "滑点价格偏移（如 0.02 → 目标 0.50 挂 0.52）")?)
+            }
+            3 => {
+                let v = prompt_f64(theme, "合并窗口毫秒（目标同时多笔合成一单；0=不合并）")?;
+                doc["aggregate_window_ms"] = value(v.max(0.0) as i64);
+            }
+            4 => {
+                doc["max_market_usdc"] =
+                    value(prompt_f64(theme, "单个结果累计下单上限 USDC（0=不封顶）")?);
             }
             2 => {
                 let modes = ["dry_run  模拟（不真实下单）", "live  实盘 ⚠（真实资金）"];
@@ -268,7 +280,12 @@ fn env_menu(theme: &ColorfulTheme) -> Result<()> {
                 set_secret("PM_FUNDER_ADDRESS", v.trim())?;
             }
             3 => {
-                let opts = ["0  普通钱包 (EOA)", "1  邮箱/Magic 代理", "2  浏览器钱包 (Safe)"];
+                let opts = [
+                    "0  普通钱包 (EOA)",
+                    "1  邮箱/Magic 代理",
+                    "2  浏览器钱包 (Safe)",
+                    "3  V2 充值钱包 (Poly1271)",
+                ];
                 let i = Select::with_theme(theme)
                     .with_prompt("PM_SIGNATURE_TYPE")
                     .items(&opts)

@@ -1,11 +1,9 @@
-//! Polymarket CLOB integration: EIP-712 signing, L2 auth, and the REST client.
+//! Polymarket CLOB integration: L1 (ClobAuth) signing used to derive/create the
+//! API credentials. Live order signing + submission is handled by the official
+//! `polymarket_client_sdk_v2` in the executor.
 
-mod auth;
-mod client;
 mod keys;
 mod signing;
 
-pub use auth::L2Creds;
-pub use client::ClobClient;
 pub use keys::{create_or_derive_api_creds, DerivedCreds};
-pub use signing::{OrderInputs, OrderSigner};
+pub use signing::OrderSigner;

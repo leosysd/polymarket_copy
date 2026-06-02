@@ -15,7 +15,17 @@ mode = "dry_run"
 copy_factor = 0.10        # follow at 10% of the target's size
 min_order_usdc = 1.0      # skip copies smaller than this (dust)
 max_order_usdc = 50.0     # never spend more than this on a single copy
-only_buys = false         # true = only mirror entries (BUY), ignore the target's exits
+only_buys = true          # true = only mirror entries (BUY), ignore the target's exits
+
+# 把目标在同一结果上、极短时间内的多笔成交合并成「一笔」再下单。
+# 适合「分批建仓 / 同时下多笔」的目标：避免每个小切片被 min_order_usdc 卡掉，
+# 也减少下单次数、降低同块多笔互相排队的延迟。单位毫秒；0 = 不合并，逐笔跟。
+aggregate_window_ms = 400
+
+# 单个结果 token（盘口的某一边）累计下单 USDC 上限：达到后该 token 不再跟。
+# 给「只买入、持有到结算」这类只加仓、不减仓的目标加一道总量闸。
+# token id 每个 5 分钟窗口都会变，所以这个上限天然按窗口重置。0 = 不封顶。
+max_market_usdc = 0.0
 
 # Marketable-limit price offset, in absolute price units, so the order crosses.
 # BUY limit = target + this; SELL limit = target - this.

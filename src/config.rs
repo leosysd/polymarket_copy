@@ -80,6 +80,19 @@ pub struct FileConfig {
     /// "GTC" (leftover rests on the book).
     #[serde(default = "default_order_type")]
     pub order_type: String,
+    /// Coalesce a target's fills of the same outcome that arrive within this many
+    /// milliseconds into ONE combined order. A target that scales into a position
+    /// with several near-simultaneous fills is then mirrored as a single order,
+    /// which avoids min_order_usdc killing each tiny slice and cuts order count.
+    /// 0 = no aggregation (copy every fill individually).
+    #[serde(default = "default_aggregate_window_ms")]
+    pub aggregate_window_ms: u64,
+    /// Cumulative USDC cap per outcome token (per market side). Once our submitted
+    /// copies for a token reach this, further copies of it are skipped — a safety
+    /// ceiling for buy-and-hold targets that only ever add to a position. Token
+    /// ids rotate per window, so this naturally resets each window. 0 = no cap.
+    #[serde(default)]
+    pub max_market_usdc: f64,
     /// Only copy fills whose market slug contains this (case-insensitive).
     /// Default limits copying to BTC 5-minute markets. Empty = all markets.
     #[serde(default = "default_market_filter")]
@@ -97,6 +110,9 @@ fn default_slippage() -> f64 {
 }
 fn default_order_type() -> String {
     "FAK".to_string()
+}
+fn default_aggregate_window_ms() -> u64 {
+    400
 }
 fn default_market_filter() -> String {
     // Empty = no market filtering (copy all of the target's trades).

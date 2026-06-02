@@ -15,14 +15,6 @@ impl Side {
             Side::Sell => "SELL",
         }
     }
-
-    /// EIP-712 / CLOB enum value: 0 = BUY, 1 = SELL.
-    pub fn as_u8(&self) -> u8 {
-        match self {
-            Side::Buy => 0,
-            Side::Sell => 1,
-        }
-    }
 }
 
 /// A target wallet's fill, decoded from an on-chain `OrderFilled` event.

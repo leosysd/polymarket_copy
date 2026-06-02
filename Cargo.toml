@@ -41,11 +41,8 @@ futures-util = "0.3"
 polymarket_client_sdk_v2 = { version = "=0.6.0-canary.1", features = ["clob"] }
 rust_decimal = "1"
 rust_decimal_macros = "1"
-hmac = "0.12"
-sha2 = "0.10"
-base64 = "0.22"
+# hex: encode the ClobAuth signature when deriving CLOB API credentials.
 hex = "0.4"
-rand = "0.8"
 
 [profile.release]
 opt-level = 3
