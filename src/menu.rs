@@ -163,12 +163,14 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
         let mode = str_at(&doc, &["mode"]).unwrap_or_default();
         let aggw = doc.get("aggregate_window_ms").and_then(|v| v.as_integer()).unwrap_or(0);
         let mkt_cap = doc.get("max_market_usdc").and_then(|v| v.as_float()).unwrap_or(0.0);
+        let filter = str_at(&doc, &["market_filter"]).unwrap_or_default();
         let items = [
             format!("跟单比例 copy_factor      [{factor}]"),
             format!("滑点 max_slippage         [{slip}]"),
             format!("模式 mode                 [{mode}]"),
             format!("合并窗口 aggregate_window_ms [{aggw}]"),
             format!("单盘口上限 max_market_usdc   [{mkt_cap}]"),
+            format!("跟单模式 market_filter    [{}]", mode_label(&filter)),
             "返回".to_string(),
         ];
         let choice = Select::with_theme(theme)
@@ -210,6 +212,31 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                 }
                 doc["mode"] = value(if i == 0 { "dry_run" } else { "live" });
             }
+            5 => {
+                let modes = [
+                    "只跟 BTC 15 分钟",
+                    "全部跟单（不限市场）",
+                    "只跟 ETH 15 分钟",
+                ];
+                // 当前值对应哪一项，作为默认高亮。
+                let cur = match filter.trim() {
+                    "btc-updown-15m" => 0,
+                    "eth-updown-15m" => 2,
+                    "" => 1,
+                    _ => 1,
+                };
+                let i = Select::with_theme(theme)
+                    .with_prompt("跟单模式（按市场 slug 过滤）")
+                    .items(&modes)
+                    .default(cur)
+                    .interact()?;
+                let f = match i {
+                    0 => "btc-updown-15m",
+                    2 => "eth-updown-15m",
+                    _ => "",
+                };
+                doc["market_filter"] = value(f);
+            }
             _ => return Ok(()),
         }
         save_doc(config_path, &doc)?;
@@ -232,6 +259,16 @@ fn offer_restart(theme: &ColorfulTheme) -> Result<()> {
         println!("  （改动将在下次启动机器人时生效）");
     }
     Ok(())
+}
+
+/// 把 market_filter 的原始值映射成人类可读的跟单模式名。
+fn mode_label(filter: &str) -> String {
+    match filter.trim() {
+        "" => "全部跟单".into(),
+        "btc-updown-15m" => "只跟 BTC 15 分钟".into(),
+        "eth-updown-15m" => "只跟 ETH 15 分钟".into(),
+        other => format!("自定义「{other}」"),
+    }
 }
 
 fn prompt_f64(theme: &ColorfulTheme, prompt: &str) -> Result<f64> {
