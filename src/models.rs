@@ -55,11 +55,12 @@ impl TargetTrade {
 pub struct CopyOrder {
     pub token_id: String,
     pub side: Side,
-    /// Limit price actually submitted (target price adjusted for slippage).
+    /// Submitted price: market cap/floor or maker post-only limit.
     pub price: f64,
     /// Reference price (the target's fill price), kept for logging.
     pub ref_price: f64,
     pub size_shares: f64,
+    /// Estimated worst-case notional for this copy at the submitted cap/floor.
     pub usdc: f64,
     pub target: String,
     pub target_label: String,

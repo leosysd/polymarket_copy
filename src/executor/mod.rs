@@ -14,6 +14,9 @@ use async_trait::async_trait;
 #[derive(Debug)]
 pub struct ExecOutcome {
     pub submitted: bool,
+    pub filled_shares: f64,
+    pub filled_usdc: f64,
+    pub accounted_usdc: f64,
     pub detail: String,
 }
 

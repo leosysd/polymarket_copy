@@ -4,7 +4,7 @@
 //! V2 CLOB rejected ("Invalid order payload").
 
 use super::{ExecOutcome, OrderExecutor};
-use crate::config::Secrets;
+use crate::config::{OrderStyle, Secrets};
 use crate::models::{CopyOrder, Side};
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
@@ -26,11 +26,16 @@ const CLOB_V2_HOST: &str = "https://clob.polymarket.com";
 pub struct ClobExecutor {
     client: Client<Authenticated<Normal>>,
     signer: PrivateKeySigner,
+    order_style: OrderStyle,
     order_type: OrderType,
 }
 
 impl ClobExecutor {
-    pub async fn new(secrets: &Secrets, order_type: &str) -> Result<ClobExecutor> {
+    pub async fn new(
+        secrets: &Secrets,
+        order_style: OrderStyle,
+        order_type: &str,
+    ) -> Result<ClobExecutor> {
         let pk = secrets
             .private_key
             .as_ref()
@@ -62,13 +67,13 @@ impl ClobExecutor {
 
         let order_type = match order_type.to_uppercase().as_str() {
             "FOK" => OrderType::FOK,
-            "GTC" => OrderType::GTC,
             _ => OrderType::FAK,
         };
 
         Ok(ClobExecutor {
             client,
             signer,
+            order_style,
             order_type,
         })
     }
@@ -84,45 +89,84 @@ impl OrderExecutor for ClobExecutor {
         // each 5-minute window rotates token ids). Real API values; a hit if warm.
         let _ = tokio::join!(self.client.tick_size(token_id), self.client.neg_risk(token_id));
 
-        // MARKET order: follow the target's direction, sized proportionally.
-        //   BUY  -> spend `order.usdc` USDC (= our_shares * target price) at market.
-        //   SELL -> sell `order.size_shares` shares at market.
-        // The CLOB fills at the current market price (no manual limit).
-        let resp = match order.side {
-            Side::Buy => {
-                let usdc = Decimal::from_str(&format!("{:.2}", order.usdc))
-                    .context("usdc amount -> Decimal")?;
+        let shares = Decimal::from_str(&format!("{:.2}", order.size_shares))
+            .context("shares -> Decimal")?;
+        let price = Decimal::from_str(&price_string(order.price))
+            .context("price -> Decimal")?;
+        let pm_side = match order.side {
+            Side::Buy => PmSide::Buy,
+            Side::Sell => PmSide::Sell,
+        };
+
+        let resp = match self.order_style {
+            OrderStyle::Market => {
                 self.client
                     .market_order()
                     .token_id(token_id)
-                    .side(PmSide::Buy)
-                    .amount(Amount::usdc(usdc)?)
+                    .side(pm_side)
+                    .price(price)
+                    .amount(Amount::shares(shares)?)
                     .order_type(self.order_type.clone())
                     .build_sign_and_post(&self.signer)
                     .await?
             }
-            Side::Sell => {
-                let shares = order.size_shares.round().max(1.0);
-                let sh = Decimal::from_str(&format!("{shares:.0}")).context("shares -> Decimal")?;
+            OrderStyle::Maker => {
                 self.client
-                    .market_order()
+                    .limit_order()
                     .token_id(token_id)
-                    .side(PmSide::Sell)
-                    .amount(Amount::shares(sh)?)
-                    .order_type(self.order_type.clone())
+                    .side(pm_side)
+                    .price(price)
+                    .size(shares)
+                    .order_type(OrderType::GTC)
+                    .post_only(true)
                     .build_sign_and_post(&self.signer)
                     .await?
             }
         };
 
+        let making = resp.making_amount.to_string().parse::<f64>().unwrap_or(0.0);
+        let taking = resp.taking_amount.to_string().parse::<f64>().unwrap_or(0.0);
+        let (filled_shares, filled_usdc) = match order.side {
+            Side::Buy => (taking, making),
+            Side::Sell => (making, taking),
+        };
+
         Ok(ExecOutcome {
             // Reflect the order-level result, not just "HTTP 200".
             submitted: resp.success,
-            detail: format!("CLOB v2 market: {resp:?}"),
+            filled_shares: if resp.success { filled_shares } else { 0.0 },
+            filled_usdc: if resp.success { filled_usdc } else { 0.0 },
+            accounted_usdc: if !resp.success {
+                0.0
+            } else if self.order_style == OrderStyle::Maker {
+                order.usdc
+            } else {
+                filled_usdc
+            },
+            detail: format!(
+                "CLOB v2 {}: success={} status={} filled={:.2} shares/{:.2} USDC id={}",
+                self.order_style.as_str(),
+                resp.success,
+                resp.status,
+                filled_shares,
+                filled_usdc,
+                resp.order_id
+            ),
         })
     }
 
     fn label(&self) -> &'static str {
         "live"
     }
+}
+
+fn price_string(price: f64) -> String {
+    let mut s = format!("{price:.4}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.push('0');
+    }
+    s
 }

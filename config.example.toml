@@ -13,8 +13,8 @@ mode = "dry_run"
 # Then capped/floored by the USDC limits below.
 # ---------------------------------------------------------------------------
 # 按比例跟单：our_shares = 目标份数 × copy_factor × weight。
-# 例：copy_factor=0.25，目标买 20 份 → 你买 5 份。订单按【市价单】下：
-# 买入花 (份数×目标价) 的 USDC、卖出卖对应份数，由市场实时成交。
+# 例：copy_factor=0.25，目标买 20 份 → 你买 5 份。订单按【按份额的市价单】下：
+# BUY/SELL 都提交目标份额，价格上限/下限由 max_slippage 控制。
 copy_factor = 0.25
 min_order_usdc = 1.0      # skip copies smaller than this (dust)
 max_order_usdc = 50.0     # never spend more than this on a single copy
@@ -30,16 +30,22 @@ aggregate_window_ms = 0
 # token id 每个 5 分钟窗口都会变，所以这个上限天然按窗口重置。0 = 不封顶。
 max_market_usdc = 0.0
 
-# Marketable-limit price offset, in absolute price units, so the order crosses.
-# BUY limit = target + this; SELL limit = target - this.
-# e.g. 0.02 means target fill 0.50 -> BUY at 0.52 (or SELL at 0.48).
+# Market-order price cap/floor, in absolute price units.
+# BUY cap = target + this; SELL floor = target - this.
+# e.g. 0.02 means target fill 0.50 -> BUY cap 0.52 (or SELL floor 0.48).
+# Maker mode uses the same value as a passive offset:
+# BUY limit = target - this; SELL limit = target + this.
 max_slippage = 0.02
+
+# "market" = share-sized market order (taker-style, FAK/FOK).
+# "maker"  = share-sized post-only limit order (GTC, may not fill).
+order_style = "market"
 
 # Order time-in-force:
 #   "FAK" = fill whatever crosses immediately, cancel the rest (recommended for
 #           fast 5-minute markets — never leaves a resting order behind).
 #   "FOK" = all-or-nothing, immediate.
-#   "GTC" = leftover rests on the book as a limit order.
+# Used only when order_style = "market"; maker orders are always GTC post-only.
 order_type = "FAK"
 
 # 窗口对齐：true = 若在 5 分钟窗口中途启动，先等到下个整点边界再下单（跳过进行中的窗口）。

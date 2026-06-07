@@ -1,6 +1,6 @@
 # polymarket_copy
 
-Polymarket 跟单机器人（Rust）。链上实时监听目标钱包的成交，按比例自动跟单。
+Polymarket 跟单机器人（Rust）。链上实时监听目标钱包的成交，按比例、按份额自动跟单。
 默认 **dry_run**（只记录、不真实下单）。
 
 ## 安装（一条命令）
@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/leosysd/polymarket_copy/main/instal
 poly
 ```
 
-菜单里能：填节点/私钥、加跟单地址、调跟单比例和滑点、切模拟/实盘、装/启停服务、看账本、**更新程序**。
+菜单里能：填节点/私钥、加跟单地址、调跟单比例和价格帽滑点、切模拟/实盘、装/启停服务、看账本、**更新程序**。
 
 > 先跑 **模拟**（默认）确认跟单逻辑没问题，再切实盘。开实盘需在「连接」里填私钥，
 > API 凭证会自动派生；第一次用很小的跟单比例试。
@@ -31,6 +31,11 @@ poly
 - **合并下单**（默认关闭）：`aggregate_window_ms = 0` 时逐笔即时跟、延迟最低。把它调成
   正数（如 100~150ms），目标在同一结果上、该毫秒数内打出的多笔成交会被合并成「一笔」
   再跟——适合会把一次意图拆成多笔小单、且小切片被 `min_order_usdc` 卡掉的目标。
+- **按份额跟单**：BUY/SELL 都按 `目标份额 × copy_factor × weight` 下 share-sized market
+  order；`max_slippage` 只是价格上限/下限，不再把 BUY 变成按 USDC 预算浮动。
+- **下单方式**：`order_style = "market"` 会立刻吃单，`order_style = "maker"` 会下
+  post-only GTC 挂单。maker 模式下 BUY 价格 = 目标价 - `max_slippage`，SELL 价格 =
+  目标价 + `max_slippage`，可能不会成交。
 - **只买入持有的目标**：把 `only_buys = true`，并按需用 `max_market_usdc` 给单个结果的
   累计下单额封顶（只加仓不减仓时的一道总量闸；token id 每个窗口都变，所以天然按窗口重置）。
   这两项都能在菜单「⚙️ 设置」里直接调。

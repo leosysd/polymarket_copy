@@ -118,6 +118,7 @@ fn status(config_path: &Path) -> Result<()> {
         "mode",
         "copy_factor",
         "max_slippage",
+        "order_style",
         "order_type",
         "min_order_usdc",
         "max_order_usdc",
@@ -160,6 +161,7 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
         let mut doc = load_doc(config_path)?;
         let factor = doc.get("copy_factor").and_then(|v| v.as_float()).unwrap_or(0.0);
         let slip = doc.get("max_slippage").and_then(|v| v.as_float()).unwrap_or(0.0);
+        let order_style = str_at(&doc, &["order_style"]).unwrap_or_else(|| "market".into());
         let mode = str_at(&doc, &["mode"]).unwrap_or_default();
         let aggw = doc.get("aggregate_window_ms").and_then(|v| v.as_integer()).unwrap_or(0);
         let mkt_cap = doc.get("max_market_usdc").and_then(|v| v.as_float()).unwrap_or(0.0);
@@ -167,6 +169,7 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
         let items = [
             format!("跟单比例 copy_factor      [{factor}]"),
             format!("滑点 max_slippage         [{slip}]"),
+            format!("下单方式 order_style      [{order_style}]"),
             format!("模式 mode                 [{mode}]"),
             format!("合并窗口 aggregate_window_ms [{aggw}]"),
             format!("单盘口上限 max_market_usdc   [{mkt_cap}]"),
@@ -184,18 +187,34 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                     value(prompt_f64(theme, "跟单比例（如 0.25 = 跟目标的 25%）")?)
             }
             1 => {
-                doc["max_slippage"] =
-                    value(prompt_f64(theme, "滑点价格偏移（如 0.02 → 目标 0.50 挂 0.52）")?)
+                doc["max_slippage"] = value(prompt_f64(
+                    theme,
+                    "价格帽滑点（如 0.02 → BUY 0.50 最高吃到 0.52）",
+                )?)
             }
-            3 => {
+            2 => {
+                let styles = ["market  吃单立即成交", "maker  挂单 post-only"];
+                let cur = if order_style.trim().eq_ignore_ascii_case("maker") {
+                    1
+                } else {
+                    0
+                };
+                let i = Select::with_theme(theme)
+                    .with_prompt("下单方式")
+                    .items(&styles)
+                    .default(cur)
+                    .interact()?;
+                doc["order_style"] = value(if i == 0 { "market" } else { "maker" });
+            }
+            4 => {
                 let v = prompt_f64(theme, "合并窗口毫秒（目标同时多笔合成一单；0=不合并）")?;
                 doc["aggregate_window_ms"] = value(v.max(0.0) as i64);
             }
-            4 => {
+            5 => {
                 doc["max_market_usdc"] =
                     value(prompt_f64(theme, "单个结果累计下单上限 USDC（0=不封顶）")?);
             }
-            2 => {
+            3 => {
                 let modes = ["dry_run  模拟（不真实下单）", "live  实盘 ⚠（真实资金）"];
                 let i = Select::with_theme(theme)
                     .with_prompt("模式")
@@ -212,7 +231,7 @@ fn settings_menu(config_path: &Path, theme: &ColorfulTheme) -> Result<()> {
                 }
                 doc["mode"] = value(if i == 0 { "dry_run" } else { "live" });
             }
-            5 => {
+            6 => {
                 let modes = [
                     "只跟 BTC 15 分钟",
                     "全部跟单（不限市场）",
@@ -719,7 +738,7 @@ fn show_ledger(config_path: &Path) -> Result<()> {
         println!("\n  {} {}  ({} 笔, 共 {:.2} USDC)", style("━━").cyan(), style(market).bold().cyan(), n, total);
         println!(
             "    {:<8} {:<5} {:<5} {:>6} {:>6} {:>7}  {}",
-            "时间", "方向", "结果", "份数", "限价", "USDC", "状态"
+            "时间", "方向", "结果", "份数", "价帽", "USDC", "状态"
         );
         for v in items {
             let ts = v["ts"].as_str().unwrap_or("");

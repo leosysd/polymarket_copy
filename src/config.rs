@@ -12,6 +12,29 @@ pub enum Mode {
     Live,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderStyle {
+    #[serde(alias = "taker")]
+    Market,
+    #[serde(alias = "limit")]
+    #[serde(alias = "post_only")]
+    Maker,
+}
+
+impl OrderStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OrderStyle::Market => "market",
+            OrderStyle::Maker => "maker",
+        }
+    }
+
+    pub fn is_market(self) -> bool {
+        self == OrderStyle::Market
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Target {
     pub address: String,
@@ -75,9 +98,11 @@ pub struct FileConfig {
     /// a BUY at target 0.50 is limited at 0.52, a SELL at 0.48).
     #[serde(default = "default_slippage")]
     pub max_slippage: f64,
-    /// Order time-in-force: "FAK" (fill what crosses now, cancel the rest —
-    /// recommended for fast markets), "FOK" (all-or-nothing immediate), or
-    /// "GTC" (leftover rests on the book).
+    /// "market" = immediate taker-style order; "maker" = post-only GTC limit order.
+    #[serde(default = "default_order_style")]
+    pub order_style: OrderStyle,
+    /// Market-order time-in-force: "FAK" (fill what crosses now, cancel the
+    /// rest) or "FOK" (all-or-nothing immediate). Maker orders always use GTC.
     #[serde(default = "default_order_type")]
     pub order_type: String,
     /// Coalesce a target's fills of the same outcome that arrive within this many
@@ -107,6 +132,9 @@ fn default_max_usdc() -> f64 {
 }
 fn default_slippage() -> f64 {
     0.02
+}
+fn default_order_style() -> OrderStyle {
+    OrderStyle::Market
 }
 fn default_order_type() -> String {
     "FAK".to_string()
@@ -157,10 +185,27 @@ impl Config {
         if file.copy_factor <= 0.0 {
             return Err(anyhow!("copy_factor must be > 0"));
         }
+        if file.min_order_usdc < 0.0 {
+            return Err(anyhow!("min_order_usdc must be >= 0"));
+        }
+        if file.max_order_usdc <= 0.0 {
+            return Err(anyhow!("max_order_usdc must be > 0"));
+        }
+        if file.max_order_usdc < file.min_order_usdc {
+            return Err(anyhow!("max_order_usdc must be >= min_order_usdc"));
+        }
+        if file.max_slippage < 0.0 || file.max_slippage >= 1.0 {
+            return Err(anyhow!("max_slippage must be in [0, 1)"));
+        }
+        for target in &file.targets {
+            if target.weight <= 0.0 {
+                return Err(anyhow!("target weight must be > 0 ({})", target.address));
+            }
+        }
         file.order_type = file.order_type.to_uppercase();
-        if !matches!(file.order_type.as_str(), "FAK" | "FOK" | "GTC" | "GTD") {
+        if file.order_style.is_market() && !matches!(file.order_type.as_str(), "FAK" | "FOK") {
             return Err(anyhow!(
-                "order_type must be one of FAK, FOK, GTC, GTD (got {})",
+                "order_type must be FAK or FOK for market orders (got {})",
                 file.order_type
             ));
         }
