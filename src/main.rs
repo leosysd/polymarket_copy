@@ -78,10 +78,11 @@ async fn main() -> Result<()> {
         .collect();
 
     let executor: Box<dyn OrderExecutor> = match cfg.file.mode {
-        Mode::DryRun => Box::new(DryRunExecutor::new()),
+        Mode::DryRun => Box::new(DryRunExecutor::new(cfg.file.order_style)),
         Mode::Live => {
             info!("authenticating with Polymarket CLOB v2 (official SDK)...");
-            let exec = ClobExecutor::new(&cfg.secrets, &cfg.file.order_type).await?;
+            let exec =
+                ClobExecutor::new(&cfg.secrets, cfg.file.order_style, &cfg.file.order_type).await?;
             info!("CLOB v2 authenticated");
             Box::new(exec)
         }
@@ -366,7 +367,10 @@ async fn copy_one(
             }
             match executor.execute(&order).await {
                 Ok(out) => {
-                    *spent.entry(order.token_id.clone()).or_insert(0.0) += order.usdc;
+                    let used_usdc = out.accounted_usdc;
+                    if used_usdc > 0.0 {
+                        *spent.entry(order.token_id.clone()).or_insert(0.0) += used_usdc;
+                    }
                     // proc_ms: our processing — from receiving the fill to submit.
                     let proc_ms = trade.received_at.elapsed().as_millis();
                     // detect_ms: chain → we received it. Needs the provider to put
@@ -382,6 +386,8 @@ async fn copy_one(
                         shares = order.size_shares,
                         price = order.price,
                         usdc = format!("{:.2}", order.usdc),
+                        filled_shares = format!("{:.2}", out.filled_shares),
+                        filled_usdc = format!("{:.2}", out.filled_usdc),
                         submitted = out.submitted,
                         proc_ms,
                         detect_ms = detect_ms.map(|d| d.to_string()).unwrap_or_else(|| "n/a".into()),
@@ -456,14 +462,18 @@ fn append_ledger(
     let row = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "mode": match cfg.file.mode { Mode::DryRun => "dry_run", Mode::Live => "live" },
+        "order_style": cfg.file.order_style.as_str(),
         "submitted": out.submitted,
         "market": market,
         "outcome": outcome,
         "side": order.side.as_str(),
         "size_shares": order.size_shares,
+        "filled_shares": out.filled_shares,
         "price": order.price,
         "ref_price": order.ref_price,
         "usdc": order.usdc,
+        "filled_usdc": out.filled_usdc,
+        "accounted_usdc": out.accounted_usdc,
         "proc_ms": proc_ms,
         "detect_ms": detect_ms,
         "total_ms": detect_ms.map(|d| d + proc_ms as i64),
