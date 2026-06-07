@@ -63,7 +63,7 @@ pub fn build_order(
     Ok(CopyOrder {
         token_id: trade.token_id.clone(),
         side: trade.side,
-        price: round_price(order_price),
+        price: round_price_for_order(cfg.order_style, trade.side, order_price),
         ref_price: trade.price,
         size_shares: shares,
         usdc,
@@ -73,9 +73,17 @@ pub fn build_order(
     })
 }
 
-/// Polymarket prices tick in cents (2 decimals).
-fn round_price(p: f64) -> f64 {
-    (p * 10_000.0).round() / 10_000.0
+/// Polymarket prices tick in cents (2 decimals). Keep maker orders passive when
+/// quantizing: BUY rounds down, SELL rounds up.
+fn round_price_for_order(style: OrderStyle, side: Side, p: f64) -> f64 {
+    let cents = p * 100.0;
+    let rounded = match (style, side) {
+        (OrderStyle::Maker, Side::Buy) => cents.floor() / 100.0,
+        (OrderStyle::Maker, Side::Sell) => cents.ceil() / 100.0,
+        (OrderStyle::Market, Side::Buy) => cents.ceil() / 100.0,
+        (OrderStyle::Market, Side::Sell) => cents.floor() / 100.0,
+    };
+    rounded.clamp(0.01, 0.99)
 }
 
 /// Shares to 2 decimals — plenty for CLOB minimum increments.
@@ -203,5 +211,19 @@ mod tests {
         let sell = build_order(&trade(Side::Sell, 0.52, 20.0), &target(), &cfg).unwrap();
         assert_eq!(sell.size_shares, 5.0);
         assert_eq!(sell.price, 0.54);
+    }
+
+    #[test]
+    fn maker_prices_quantize_to_cents_passively() {
+        let mut cfg = cfg();
+        cfg.order_style = crate::config::OrderStyle::Maker;
+        cfg.max_slippage = 0.0;
+
+        let buy = build_order(&trade(Side::Buy, 0.3457, 20.0), &target(), &cfg).unwrap();
+        assert_eq!(buy.price, 0.34);
+
+        cfg.only_buys = false;
+        let sell = build_order(&trade(Side::Sell, 0.3457, 20.0), &target(), &cfg).unwrap();
+        assert_eq!(sell.price, 0.35);
     }
 }
