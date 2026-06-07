@@ -22,6 +22,7 @@ impl OrderExecutor for DryRunExecutor {
     async fn execute(&self, order: &CopyOrder) -> Result<ExecOutcome> {
         Ok(ExecOutcome {
             submitted: false,
+            submitted_price: order.price,
             filled_shares: order.size_shares,
             filled_usdc: order.usdc,
             accounted_usdc: order.usdc,

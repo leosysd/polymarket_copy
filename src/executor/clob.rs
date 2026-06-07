@@ -13,6 +13,8 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::Normal;
+use polymarket_client_sdk_v2::clob::types::request::OrderBookSummaryRequest;
+use polymarket_client_sdk_v2::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, SignatureType, Side as PmSide};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{Decimal, U256};
@@ -22,6 +24,7 @@ use std::str::FromStr;
 // Note: clob-v2.polymarket.com 301-redirects (POST -> GET -> 405); the real
 // host that accepts authenticated POST /order is clob.polymarket.com.
 const CLOB_V2_HOST: &str = "https://clob.polymarket.com";
+const MAKER_CROSS_RETRIES: u32 = 1;
 
 pub struct ClobExecutor {
     client: Client<Authenticated<Normal>>,
@@ -98,9 +101,9 @@ impl OrderExecutor for ClobExecutor {
             Side::Sell => PmSide::Sell,
         };
 
-        let resp = match self.order_style {
+        let (resp, submitted_price) = match self.order_style {
             OrderStyle::Market => {
-                self.client
+                let resp = self.client
                     .market_order()
                     .token_id(token_id)
                     .side(pm_side)
@@ -108,19 +111,11 @@ impl OrderExecutor for ClobExecutor {
                     .amount(Amount::shares(shares)?)
                     .order_type(self.order_type.clone())
                     .build_sign_and_post(&self.signer)
-                    .await?
+                    .await?;
+                (resp, price)
             }
             OrderStyle::Maker => {
-                self.client
-                    .limit_order()
-                    .token_id(token_id)
-                    .side(pm_side)
-                    .price(price)
-                    .size(shares)
-                    .order_type(OrderType::GTC)
-                    .post_only(true)
-                    .build_sign_and_post(&self.signer)
-                    .await?
+                self.execute_maker(token_id, pm_side, shares, price).await?
             }
         };
 
@@ -134,20 +129,22 @@ impl OrderExecutor for ClobExecutor {
         Ok(ExecOutcome {
             // Reflect the order-level result, not just "HTTP 200".
             submitted: resp.success,
+            submitted_price: decimal_to_f64(submitted_price),
             filled_shares: if resp.success { filled_shares } else { 0.0 },
             filled_usdc: if resp.success { filled_usdc } else { 0.0 },
             accounted_usdc: if !resp.success {
                 0.0
             } else if self.order_style == OrderStyle::Maker {
-                order.usdc
+                order.size_shares * decimal_to_f64(submitted_price)
             } else {
                 filled_usdc
             },
             detail: format!(
-                "CLOB v2 {}: success={} status={} filled={:.2} shares/{:.2} USDC id={}",
+                "CLOB v2 {}: success={} status={} price={} filled={:.2} shares/{:.2} USDC id={}",
                 self.order_style.as_str(),
                 resp.success,
                 resp.status,
+                submitted_price,
                 filled_shares,
                 filled_usdc,
                 resp.order_id
@@ -158,6 +155,108 @@ impl OrderExecutor for ClobExecutor {
     fn label(&self) -> &'static str {
         "live"
     }
+}
+
+impl ClobExecutor {
+    async fn execute_maker(
+        &self,
+        token_id: U256,
+        side: PmSide,
+        shares: Decimal,
+        desired_price: Decimal,
+    ) -> Result<(PostOrderResponse, Decimal)> {
+        let mut last_err: Option<anyhow::Error> = None;
+        for extra_ticks in 0..=MAKER_CROSS_RETRIES {
+            let price = self
+                .passive_maker_price(token_id, side, desired_price, extra_ticks)
+                .await?;
+            match self.post_maker_order(token_id, side, shares, price).await {
+                Ok(resp) => return Ok((resp, price)),
+                Err(e) if is_crosses_book_error(&e) && extra_ticks < MAKER_CROSS_RETRIES => {
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("maker order failed")))
+    }
+
+    async fn post_maker_order(
+        &self,
+        token_id: U256,
+        side: PmSide,
+        shares: Decimal,
+        price: Decimal,
+    ) -> Result<PostOrderResponse> {
+        Ok(self
+            .client
+            .limit_order()
+            .token_id(token_id)
+            .side(side)
+            .price(price)
+            .size(shares)
+            .order_type(OrderType::GTC)
+            .post_only(true)
+            .build_sign_and_post(&self.signer)
+            .await?)
+    }
+
+    async fn passive_maker_price(
+        &self,
+        token_id: U256,
+        side: PmSide,
+        desired_price: Decimal,
+        extra_ticks: u32,
+    ) -> Result<Decimal> {
+        let book = self
+            .client
+            .order_book(&OrderBookSummaryRequest::builder().token_id(token_id).build())
+            .await
+            .context("fetching order book for maker pricing")?;
+        let tick = book.tick_size.as_decimal();
+        let away = tick * Decimal::from(extra_ticks + 1);
+        let min_price = tick;
+        let max_price = Decimal::ONE - tick;
+
+        let price = match side {
+            PmSide::Buy => {
+                let Some(best_ask) = book.asks.iter().map(|l| l.price).min() else {
+                    return Ok(desired_price.clamp(min_price, max_price));
+                };
+                let cap = best_ask - away;
+                if cap < min_price {
+                    return Err(anyhow!(
+                        "no passive BUY price available: best_ask={best_ask} tick={tick}"
+                    ));
+                }
+                if desired_price < cap { desired_price } else { cap }
+            }
+            PmSide::Sell => {
+                let Some(best_bid) = book.bids.iter().map(|l| l.price).max() else {
+                    return Ok(desired_price.clamp(min_price, max_price));
+                };
+                let floor = best_bid + away;
+                if floor > max_price {
+                    return Err(anyhow!(
+                        "no passive SELL price available: best_bid={best_bid} tick={tick}"
+                    ));
+                }
+                if desired_price > floor { desired_price } else { floor }
+            }
+            PmSide::Unknown => return Err(anyhow!("cannot price maker order for unknown side")),
+            _ => return Err(anyhow!("cannot price maker order for unsupported side")),
+        };
+
+        Ok(price.clamp(min_price, max_price))
+    }
+}
+
+fn is_crosses_book_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("post-only order: order crosses book")
+}
+
+fn decimal_to_f64(value: Decimal) -> f64 {
+    value.to_string().parse::<f64>().unwrap_or(0.0)
 }
 
 fn price_string(price: f64) -> String {
